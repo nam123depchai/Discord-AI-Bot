@@ -8,6 +8,7 @@ from openai import OpenAI
 import discord
 from discord import app_commands
 from discord.ext import commands
+import lyricsgenius
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,6 +25,11 @@ client_ai = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=OPENROUTER_API_KEY,
 )
+
+genius = lyricsgenius.Genius(os.environ["GENIUS_ACCESS_TOKEN"], timeout=15)
+genius.verbose = False
+genius.remove_section_headers = False
+genius.skip_non_songs = True
 
 conversation_history: dict[int, list[dict]] = defaultdict(list)
 START_TIME = time.time()
@@ -515,6 +521,46 @@ async def slash_advice(interaction: discord.Interaction, situation: str = "life 
     await interaction.followup.send(f"🌟 **Advice**\n{reply}")
 
 
+# ── /lyrics ───────────────────────────────────────────────────────────────────
+
+def search_lyrics(song: str, artist: str | None) -> tuple[str, str, str] | None:
+    """Returns (title, artist, lyrics) or None if not found."""
+    result = genius.search_song(song, artist or "")
+    if not result:
+        return None
+    return result.title, result.artist, result.lyrics
+
+
+@bot.tree.command(name="lyrics", description="Find lyrics for a song using Genius")
+@app_commands.describe(song="Song title", artist="Artist name (optional but helps accuracy)")
+async def slash_lyrics(interaction: discord.Interaction, song: str, artist: str = ""):
+    await interaction.response.defer(thinking=True)
+    try:
+        found = await asyncio.get_event_loop().run_in_executor(
+            None, search_lyrics, song, artist or None
+        )
+    except Exception as exc:
+        log.exception("Genius error: %s", exc)
+        await interaction.followup.send("❌ Something went wrong searching Genius. Try again!")
+        return
+
+    if not found:
+        await interaction.followup.send(
+            f"❌ Couldn't find lyrics for **{song}**" + (f" by **{artist}**" if artist else "") + ". Try a different spelling!"
+        )
+        return
+
+    title, art, lyrics = found
+
+    # Trim lyrics to fit Discord's 2000 char limit with room for header
+    header = f"🎵 **{title}** — *{art}*\n\n"
+    max_lyrics = 2000 - len(header) - 50
+    if len(lyrics) > max_lyrics:
+        lyrics = lyrics[:max_lyrics] + "\n\n*[lyrics trimmed — full version on Genius]*"
+
+    await interaction.followup.send(header + lyrics)
+
+
 # ── /help ─────────────────────────────────────────────────────────────────────
 
 @bot.tree.command(name="help", description="See all available commands")
@@ -547,6 +593,9 @@ async def slash_help(interaction: discord.Interaction):
         "`/fact [topic]` — Random fact\n"
         "`/story <topic>` — Short story\n"
         "`/advice [situation]` — Life advice"
+    ), inline=False)
+    embed.add_field(name="🎵 Music", value=(
+        "`/lyrics <song> [artist]` — Find song lyrics via Genius"
     ), inline=False)
     embed.add_field(name="🔒 Admin Only", value=(
         "`/admin rage <1-10>` — Change bot energy level\n"
