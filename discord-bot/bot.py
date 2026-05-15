@@ -95,14 +95,14 @@ AUTO_REPLY_CHANNEL_ID = 1492160189489741858
 
 @bot.event
 async def on_ready():
-    # Wipe global commands so they don't show as duplicates
-    bot.tree.clear_commands(guild=None)
-    await bot.tree.sync()
-    # Register guild-specific commands (appear instantly)
+    # First copy & sync commands to each guild (instant availability)
     for guild in bot.guilds:
         bot.tree.copy_global_to(guild=guild)
         await bot.tree.sync(guild=guild)
-    log.info("Logged in as %s (ID: %s) — synced to %d guild(s), duplicates cleared!", bot.user, bot.user.id, len(bot.guilds))
+    # Then wipe global commands so they don't duplicate in the / menu
+    bot.tree.clear_commands(guild=None)
+    await bot.tree.sync()
+    log.info("Logged in as %s (ID: %s) — synced to %d guild(s)!", bot.user, bot.user.id, len(bot.guilds))
 
 
 @bot.event
