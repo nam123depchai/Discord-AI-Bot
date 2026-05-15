@@ -10,6 +10,8 @@ from discord import app_commands
 from discord.ext import commands
 import requests as req
 from urllib.parse import quote
+import cloudscraper
+from bs4 import BeautifulSoup
 
 logging.basicConfig(
     level=logging.INFO,
@@ -546,7 +548,7 @@ def search_lyrics(song: str, artist: str | None) -> dict | None:
     genius_url = hit["url"]
     thumbnail = hit.get("song_art_image_thumbnail_url", "")
 
-    # Try lyrics.ovh for the actual text
+    # 1st try: lyrics.ovh (fast, good for English songs)
     lyrics = None
     try:
         lr = req.get(
@@ -554,9 +556,28 @@ def search_lyrics(song: str, artist: str | None) -> dict | None:
             timeout=10,
         )
         if lr.status_code == 200:
-            lyrics = lr.json().get("lyrics", "").strip()
+            lyrics = lr.json().get("lyrics", "").strip() or None
     except Exception:
         pass
+
+    # 2nd try: scrape Genius directly (works for non-English songs)
+    if not lyrics:
+        try:
+            scraper = cloudscraper.create_scraper()
+            page = scraper.get(genius_url, timeout=15)
+            if page.status_code == 200:
+                soup = BeautifulSoup(page.text, "html.parser")
+                # Genius stores lyrics in containers with data-lyrics-container attr
+                containers = soup.find_all("div", attrs={"data-lyrics-container": "true"})
+                if containers:
+                    parts = []
+                    for c in containers:
+                        for br in c.find_all("br"):
+                            br.replace_with("\n")
+                        parts.append(c.get_text())
+                    lyrics = "\n".join(parts).strip() or None
+        except Exception as e:
+            log.warning("Genius scrape fallback failed: %s", e)
 
     return {
         "title": title,
