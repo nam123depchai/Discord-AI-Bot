@@ -91,12 +91,18 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
+AUTO_REPLY_CHANNEL_ID = 1492160189489741858
+
 @bot.event
 async def on_ready():
+    # Wipe global commands so they don't show as duplicates
+    bot.tree.clear_commands(guild=None)
+    await bot.tree.sync()
+    # Register guild-specific commands (appear instantly)
     for guild in bot.guilds:
         bot.tree.copy_global_to(guild=guild)
         await bot.tree.sync(guild=guild)
-    log.info("Logged in as %s (ID: %s) — slash commands synced to %d guild(s)!", bot.user, bot.user.id, len(bot.guilds))
+    log.info("Logged in as %s (ID: %s) — synced to %d guild(s), duplicates cleared!", bot.user, bot.user.id, len(bot.guilds))
 
 
 @bot.event
@@ -107,7 +113,9 @@ async def on_message(message: discord.Message):
 
     mentioned = bot.user in message.mentions
     is_dm = isinstance(message.channel, discord.DMChannel)
-    if not (mentioned or is_dm):
+    is_auto_channel = message.channel.id == AUTO_REPLY_CHANNEL_ID
+
+    if not (mentioned or is_dm or is_auto_channel):
         return
 
     content = message.content
@@ -116,7 +124,8 @@ async def on_message(message: discord.Message):
     content = content.strip()
 
     if not content:
-        await message.reply("Hey! How can I help you? Try `/help` to see all commands.")
+        if not is_auto_channel:
+            await message.reply("Hey! How can I help you? Try `/help` to see all commands.")
         return
 
     async with message.channel.typing():
