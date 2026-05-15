@@ -8,7 +8,8 @@ from openai import OpenAI
 import discord
 from discord import app_commands
 from discord.ext import commands
-import lyricsgenius
+import requests as req
+from urllib.parse import quote
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,10 +27,8 @@ client_ai = OpenAI(
     api_key=OPENROUTER_API_KEY,
 )
 
-genius = lyricsgenius.Genius(os.environ["GENIUS_ACCESS_TOKEN"], timeout=15)
-genius.verbose = False
-genius.remove_section_headers = False
-genius.skip_non_songs = True
+GENIUS_TOKEN = os.environ["GENIUS_ACCESS_TOKEN"]
+GENIUS_HEADERS = {"Authorization": f"Bearer {GENIUS_TOKEN}"}
 
 conversation_history: dict[int, list[dict]] = defaultdict(list)
 START_TIME = time.time()
@@ -523,12 +522,49 @@ async def slash_advice(interaction: discord.Interaction, situation: str = "life 
 
 # ── /lyrics ───────────────────────────────────────────────────────────────────
 
-def search_lyrics(song: str, artist: str | None) -> tuple[str, str, str] | None:
-    """Returns (title, artist, lyrics) or None if not found."""
-    result = genius.search_song(song, artist or "")
-    if not result:
+def search_lyrics(song: str, artist: str | None) -> dict | None:
+    """
+    1. Search Genius API for the song → get title, artist, page URL.
+    2. Fetch lyrics text from lyrics.ovh (no scraping / no Cloudflare).
+    Returns dict with keys: title, artist, lyrics, genius_url  — or None.
+    """
+    query = f"{song} {artist}" if artist else song
+    r = req.get(
+        "https://api.genius.com/search",
+        params={"q": query},
+        headers=GENIUS_HEADERS,
+        timeout=10,
+    )
+    r.raise_for_status()
+    hits = r.json().get("response", {}).get("hits", [])
+    if not hits:
         return None
-    return result.title, result.artist, result.lyrics
+
+    hit = hits[0]["result"]
+    title = hit["title"]
+    art = hit["primary_artist"]["name"]
+    genius_url = hit["url"]
+    thumbnail = hit.get("song_art_image_thumbnail_url", "")
+
+    # Try lyrics.ovh for the actual text
+    lyrics = None
+    try:
+        lr = req.get(
+            f"https://api.lyrics.ovh/v1/{quote(art)}/{quote(title)}",
+            timeout=10,
+        )
+        if lr.status_code == 200:
+            lyrics = lr.json().get("lyrics", "").strip()
+    except Exception:
+        pass
+
+    return {
+        "title": title,
+        "artist": art,
+        "lyrics": lyrics,
+        "genius_url": genius_url,
+        "thumbnail": thumbnail,
+    }
 
 
 @bot.tree.command(name="lyrics", description="Find lyrics for a song using Genius")
@@ -541,24 +577,45 @@ async def slash_lyrics(interaction: discord.Interaction, song: str, artist: str 
         )
     except Exception as exc:
         log.exception("Genius error: %s", exc)
-        await interaction.followup.send("❌ Something went wrong searching Genius. Try again!")
+        await interaction.followup.send("❌ Something went wrong contacting Genius. Try again!")
         return
 
     if not found:
+        msg = f"❌ Couldn't find **{song}**"
+        if artist:
+            msg += f" by **{artist}**"
+        await interaction.followup.send(msg + ". Try a different spelling!")
+        return
+
+    title = found["title"]
+    art = found["artist"]
+    genius_url = found["genius_url"]
+    lyrics = found["lyrics"]
+    thumbnail = found["thumbnail"]
+
+    header = f"🎵 **{title}** — *{art}*\n🔗 <{genius_url}>\n\n"
+
+    if not lyrics:
+        # Lyrics.ovh didn't have it — just send the Genius link
         await interaction.followup.send(
-            f"❌ Couldn't find lyrics for **{song}**" + (f" by **{artist}**" if artist else "") + ". Try a different spelling!"
+            f"🎵 **{title}** — *{art}*\n"
+            f"Found the song on Genius but couldn't retrieve the lyrics text.\n"
+            f"👉 Read them here: {genius_url}"
         )
         return
 
-    title, art, lyrics = found
-
-    # Trim lyrics to fit Discord's 2000 char limit with room for header
-    header = f"🎵 **{title}** — *{art}*\n\n"
-    max_lyrics = 2000 - len(header) - 50
+    # Trim to fit Discord's 2000 char limit
+    max_lyrics = 2000 - len(header) - 60
+    trimmed = False
     if len(lyrics) > max_lyrics:
-        lyrics = lyrics[:max_lyrics] + "\n\n*[lyrics trimmed — full version on Genius]*"
+        lyrics = lyrics[:max_lyrics]
+        trimmed = True
 
-    await interaction.followup.send(header + lyrics)
+    msg = header + lyrics
+    if trimmed:
+        msg += f"\n\n*...lyrics trimmed. Full version → {genius_url}*"
+
+    await interaction.followup.send(msg)
 
 
 # ── /help ─────────────────────────────────────────────────────────────────────
