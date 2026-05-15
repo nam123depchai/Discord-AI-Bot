@@ -593,10 +593,7 @@ async def slash_lyrics(interaction: discord.Interaction, song: str, artist: str 
     lyrics = found["lyrics"]
     thumbnail = found["thumbnail"]
 
-    header = f"🎵 **{title}** — *{art}*\n🔗 <{genius_url}>\n\n"
-
     if not lyrics:
-        # Lyrics.ovh didn't have it — just send the Genius link
         await interaction.followup.send(
             f"🎵 **{title}** — *{art}*\n"
             f"Found the song on Genius but couldn't retrieve the lyrics text.\n"
@@ -604,18 +601,14 @@ async def slash_lyrics(interaction: discord.Interaction, song: str, artist: str 
         )
         return
 
-    # Trim to fit Discord's 2000 char limit
-    max_lyrics = 2000 - len(header) - 60
-    trimmed = False
-    if len(lyrics) > max_lyrics:
-        lyrics = lyrics[:max_lyrics]
-        trimmed = True
+    # Send header first, then split lyrics into 1900-char chunks
+    await interaction.followup.send(f"🎵 **{title}** — *{art}*\n🔗 <{genius_url}>")
 
-    msg = header + lyrics
-    if trimmed:
-        msg += f"\n\n*...lyrics trimmed. Full version → {genius_url}*"
-
-    await interaction.followup.send(msg)
+    chunk_size = 1900
+    chunks = [lyrics[i:i + chunk_size] for i in range(0, len(lyrics), chunk_size)]
+    for i, chunk in enumerate(chunks):
+        label = f"*Part {i+1}/{len(chunks)}*\n" if len(chunks) > 1 else ""
+        await interaction.channel.send(f"{label}```{chunk}```")
 
 
 # ── /help ─────────────────────────────────────────────────────────────────────
