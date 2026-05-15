@@ -93,8 +93,10 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 @bot.event
 async def on_ready():
-    await bot.tree.sync()
-    log.info("Logged in as %s (ID: %s) — slash commands synced!", bot.user, bot.user.id)
+    for guild in bot.guilds:
+        bot.tree.copy_global_to(guild=guild)
+        await bot.tree.sync(guild=guild)
+    log.info("Logged in as %s (ID: %s) — slash commands synced to %d guild(s)!", bot.user, bot.user.id, len(bot.guilds))
 
 
 @bot.event
