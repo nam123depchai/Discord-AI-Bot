@@ -35,7 +35,7 @@ SYSTEM_PROMPT = (
 def trim_history(channel_id: int) -> None:
     history = conversation_history[channel_id]
     if len(history) > MAX_HISTORY * 2:
-        conversation_history[channel_id] = history[-(MAX_HISTORY * 2):]
+        conversation_history[channel_id] = history[-(MAX_HISTORY * 2) :]
 
 
 def ask_ai(channel_id: int, user_message: str) -> str:
@@ -49,17 +49,19 @@ def ask_ai(channel_id: int, user_message: str) -> str:
     response = client_ai.chat.completions.create(
         model=MODEL,
         messages=messages,
-        extra_body={"reasoning": {"enabled": True}},
+        extra_body={"reasoning": {"disabled": True}},
     )
 
     assistant_msg = response.choices[0].message
     reply_text = assistant_msg.content or ""
 
-    history.append({
-        "role": "assistant",
-        "content": assistant_msg.content,
-        "reasoning_details": assistant_msg.reasoning_details,
-    })
+    history.append(
+        {
+            "role": "assistant",
+            "content": assistant_msg.content,
+            "reasoning_details": assistant_msg.reasoning_details,
+        }
+    )
 
     return reply_text
 
@@ -91,7 +93,9 @@ async def on_message(message: discord.Message):
 
     content = message.content
     for mention in message.mentions:
-        content = content.replace(f"<@{mention.id}>", "").replace(f"<@!{mention.id}>", "")
+        content = content.replace(f"<@{mention.id}>", "").replace(
+            f"<@!{mention.id}>", ""
+        )
     content = content.strip()
 
     if not content:
@@ -106,7 +110,9 @@ async def on_message(message: discord.Message):
             )
         except Exception as exc:
             log.exception("Error calling OpenRouter: %s", exc)
-            await message.reply("Sorry, I ran into an error. Please try again in a moment.")
+            await message.reply(
+                "Sorry, I ran into an error. Please try again in a moment."
+            )
             return
 
     if not reply:
@@ -115,7 +121,7 @@ async def on_message(message: discord.Message):
 
     if len(reply) > 2000:
         for i in range(0, len(reply), 2000):
-            await message.channel.send(reply[i:i + 2000])
+            await message.channel.send(reply[i : i + 2000])
     else:
         await message.reply(reply)
 
@@ -140,7 +146,7 @@ async def chat_command(ctx: commands.Context, *, message: str):
 
     if len(reply) > 2000:
         for i in range(0, len(reply), 2000):
-            await ctx.send(reply[i:i + 2000])
+            await ctx.send(reply[i : i + 2000])
     else:
         await ctx.reply(reply)
 
