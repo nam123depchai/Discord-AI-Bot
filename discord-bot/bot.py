@@ -3,6 +3,7 @@ import asyncio
 import logging
 import random
 import time
+import datetime
 from collections import defaultdict
 from openai import OpenAI
 import discord
@@ -285,6 +286,228 @@ async def admin_setchannel(interaction: discord.Interaction, channel: discord.Te
 async def admin_say(interaction: discord.Interaction, channel: discord.TextChannel, message: str):
     await channel.send(message)
     await interaction.response.send_message(f"✅ Sent to {channel.mention}", ephemeral=True)
+
+
+@admin_group.command(name="announce", description="Send a fancy announcement embed to a channel")
+@app_commands.describe(
+    channel="Target channel",
+    title="Announcement title",
+    message="Announcement body",
+    ping="Ping @everyone? (default: no)",
+    color="Embed color: red, green, blue, gold, purple (default: gold)",
+)
+async def admin_announce(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel,
+    title: str,
+    message: str,
+    ping: bool = False,
+    color: str = "gold",
+):
+    colors = {
+        "red": discord.Color.red(), "green": discord.Color.green(),
+        "blue": discord.Color.blue(), "gold": discord.Color.gold(),
+        "purple": discord.Color.purple(), "orange": discord.Color.orange(),
+        "pink": discord.Color.magenta(),
+    }
+    embed = discord.Embed(
+        title=f"📢 {title}",
+        description=message,
+        color=colors.get(color.lower(), discord.Color.gold()),
+        timestamp=datetime.datetime.utcnow(),
+    )
+    embed.set_footer(text=f"Announced by {interaction.user.display_name}")
+    content = "@everyone" if ping else None
+    await channel.send(content=content, embed=embed)
+    await interaction.response.send_message(f"✅ Announcement sent to {channel.mention}!", ephemeral=True)
+
+
+@admin_group.command(name="poll", description="Create a poll with up to 4 options")
+@app_commands.describe(
+    question="The poll question",
+    option1="First option", option2="Second option",
+    option3="Third option (optional)", option4="Fourth option (optional)",
+)
+async def admin_poll(
+    interaction: discord.Interaction,
+    question: str,
+    option1: str,
+    option2: str,
+    option3: str = "",
+    option4: str = "",
+):
+    emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣"]
+    options = [o for o in [option1, option2, option3, option4] if o]
+    desc = "\n".join(f"{emojis[i]} {opt}" for i, opt in enumerate(options))
+    embed = discord.Embed(
+        title=f"📊 {question}",
+        description=desc,
+        color=discord.Color.blurple(),
+        timestamp=datetime.datetime.utcnow(),
+    )
+    embed.set_footer(text=f"Poll by {interaction.user.display_name} • React to vote!")
+    await interaction.response.send_message(embed=embed)
+    msg = await interaction.original_response()
+    for i in range(len(options)):
+        await msg.add_reaction(emojis[i])
+
+
+@admin_group.command(name="purge", description="Delete the last X messages in this channel")
+@app_commands.describe(amount="Number of messages to delete (max 100)")
+async def admin_purge(interaction: discord.Interaction, amount: int):
+    amount = min(max(amount, 1), 100)
+    await interaction.response.defer(ephemeral=True)
+    deleted = await interaction.channel.purge(limit=amount)
+    await interaction.followup.send(f"🗑️ Deleted **{len(deleted)}** messages.", ephemeral=True)
+    log.info("%s purged %d messages in #%s", interaction.user, len(deleted), interaction.channel)
+
+
+@admin_group.command(name="mute", description="Timeout (mute) a user for X minutes")
+@app_commands.describe(user="User to mute", minutes="Duration in minutes (max 40320 = 28 days)", reason="Reason")
+async def admin_mute(interaction: discord.Interaction, user: discord.Member, minutes: int = 10, reason: str = "No reason given"):
+    minutes = min(max(minutes, 1), 40320)
+    duration = datetime.timedelta(minutes=minutes)
+    await user.timeout(duration, reason=f"{reason} (by {interaction.user})")
+    await interaction.response.send_message(
+        f"🔇 **{user.display_name}** has been muted for **{minutes} minute(s)**.\n📝 Reason: {reason}"
+    )
+    log.info("%s muted %s for %d minutes", interaction.user, user, minutes)
+
+
+@admin_group.command(name="unmute", description="Remove timeout from a user")
+@app_commands.describe(user="User to unmute")
+async def admin_unmute(interaction: discord.Interaction, user: discord.Member):
+    await user.timeout(None)
+    await interaction.response.send_message(f"🔊 **{user.display_name}** has been unmuted.")
+
+
+@admin_group.command(name="nickname", description="Change a user's nickname")
+@app_commands.describe(user="Target user", nickname="New nickname (leave empty to reset)")
+async def admin_nickname(interaction: discord.Interaction, user: discord.Member, nickname: str = ""):
+    old = user.display_name
+    await user.edit(nick=nickname or None)
+    if nickname:
+        await interaction.response.send_message(f"✏️ Changed **{old}**'s nickname to **{nickname}**")
+    else:
+        await interaction.response.send_message(f"✏️ Reset **{old}**'s nickname")
+
+
+@admin_group.command(name="giveaway", description="Start a giveaway in a channel")
+@app_commands.describe(
+    channel="Channel to post the giveaway",
+    prize="What are you giving away?",
+    minutes="How many minutes until it ends",
+)
+async def admin_giveaway(interaction: discord.Interaction, channel: discord.TextChannel, prize: str, minutes: int = 60):
+    minutes = min(max(minutes, 1), 10080)
+    end_time = discord.utils.utcnow() + datetime.timedelta(minutes=minutes)
+    embed = discord.Embed(
+        title="🎉 GIVEAWAY 🎉",
+        description=f"**Prize:** {prize}\n\nReact with 🎉 to enter!\n\n**Ends:** <t:{int(end_time.timestamp())}:R>",
+        color=discord.Color.gold(),
+        timestamp=end_time,
+    )
+    embed.set_footer(text=f"Hosted by {interaction.user.display_name} • Ends at")
+    msg = await channel.send(embed=embed)
+    await msg.add_reaction("🎉")
+    await interaction.response.send_message(f"✅ Giveaway started in {channel.mention}!", ephemeral=True)
+
+    # Wait and pick a winner
+    async def end_giveaway():
+        await asyncio.sleep(minutes * 60)
+        try:
+            msg_updated = await channel.fetch_message(msg.id)
+            reaction = discord.utils.get(msg_updated.reactions, emoji="🎉")
+            if reaction:
+                users = [u async for u in reaction.users() if not u.bot]
+                if users:
+                    winner = random.choice(users)
+                    await channel.send(f"🎉 Congratulations {winner.mention}! You won **{prize}**!")
+                else:
+                    await channel.send(f"😢 No one entered the giveaway for **{prize}**.")
+        except Exception as e:
+            log.exception("Giveaway end error: %s", e)
+
+    asyncio.create_task(end_giveaway())
+
+
+@admin_group.command(name="embed", description="Send a custom embed message to a channel")
+@app_commands.describe(
+    channel="Target channel",
+    title="Embed title",
+    description="Embed body text",
+    color="Color: red, green, blue, gold, purple, orange, pink (default: blue)",
+    footer="Optional footer text",
+)
+async def admin_embed(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel,
+    title: str,
+    description: str,
+    color: str = "blue",
+    footer: str = "",
+):
+    colors = {
+        "red": discord.Color.red(), "green": discord.Color.green(),
+        "blue": discord.Color.blue(), "gold": discord.Color.gold(),
+        "purple": discord.Color.purple(), "orange": discord.Color.orange(),
+        "pink": discord.Color.magenta(),
+    }
+    embed = discord.Embed(
+        title=title,
+        description=description,
+        color=colors.get(color.lower(), discord.Color.blue()),
+    )
+    if footer:
+        embed.set_footer(text=footer)
+    await channel.send(embed=embed)
+    await interaction.response.send_message(f"✅ Embed sent to {channel.mention}!", ephemeral=True)
+
+
+@admin_group.command(name="roastall", description="Make the AI roast everyone currently in the server 🔥")
+async def admin_roastall(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
+    members = [m for m in interaction.guild.members if not m.bot][:10]
+    names = ", ".join(m.display_name for m in members)
+    prompt = (
+        f"Give a short, hilarious group roast for these Discord server members: {names}. "
+        "Keep it playful and funny — roast the whole group together in 3-5 sentences."
+    )
+    try:
+        reply = await asyncio.get_event_loop().run_in_executor(None, ask_ai_once, prompt)
+    except Exception:
+        await interaction.followup.send("Couldn't come up with a roast!")
+        return
+    await interaction.followup.send(f"🔥 **Server Roast!**\n\n{reply}")
+
+
+@admin_group.command(name="quiz", description="Drop an AI-generated quiz question in a channel")
+@app_commands.describe(channel="Channel to send the quiz", topic="Topic for the quiz question (optional)")
+async def admin_quiz(interaction: discord.Interaction, channel: discord.TextChannel, topic: str = "random"):
+    await interaction.response.defer(ephemeral=True)
+    prompt = (
+        f"Create one fun multiple-choice quiz question about {topic}. "
+        "Give 4 options labeled A B C D. Do NOT reveal the answer yet — "
+        "just end with '||Answer: X||' using Discord spoiler tags so people have to click to see."
+    )
+    try:
+        reply = await asyncio.get_event_loop().run_in_executor(None, ask_ai_once, prompt)
+    except Exception:
+        await interaction.followup.send("Couldn't generate a quiz!", ephemeral=True)
+        return
+    await channel.send(f"🧠 **Quiz Time!**\n\n{reply}")
+    await interaction.followup.send(f"✅ Quiz posted in {channel.mention}!", ephemeral=True)
+
+
+@admin_group.command(name="slowmode", description="Set slowmode in a channel")
+@app_commands.describe(channel="Target channel", seconds="Delay in seconds (0 to disable, max 21600)")
+async def admin_slowmode(interaction: discord.Interaction, channel: discord.TextChannel, seconds: int):
+    seconds = min(max(seconds, 0), 21600)
+    await channel.edit(slowmode_delay=seconds)
+    if seconds == 0:
+        await interaction.response.send_message(f"✅ Slowmode disabled in {channel.mention}")
+    else:
+        await interaction.response.send_message(f"🐢 Slowmode set to **{seconds}s** in {channel.mention}")
 
 
 bot.tree.add_command(admin_group)
@@ -668,12 +891,25 @@ async def slash_help(interaction: discord.Interaction):
     embed.add_field(name="🎵 Music", value=(
         "`/lyrics <song> [artist]` — Find song lyrics via Genius"
     ), inline=False)
-    embed.add_field(name="🔒 Admin Only", value=(
-        "`/admin rage <1-10>` — Change bot energy level\n"
-        "`/admin status` — View bot stats\n"
+    embed.add_field(name="🔒 Admin — Bot", value=(
+        "`/admin rage <1-10>` — Change bot energy\n"
+        "`/admin status` — Bot stats\n"
         "`/admin clearall` — Clear all chat history\n"
-        "`/admin setchannel #channel` — Set auto-reply channel\n"
-        "`/admin say #channel <msg>` — Make bot send a message"
+        "`/admin setchannel` — Set auto-reply channel\n"
+        "`/admin say` — Make bot say something"
+    ), inline=False)
+    embed.add_field(name="🔒 Admin — Server", value=(
+        "`/admin announce` — Fancy announcement embed\n"
+        "`/admin poll` — Create a vote poll (up to 4 options)\n"
+        "`/admin purge <n>` — Delete last N messages\n"
+        "`/admin mute @user <mins>` — Timeout a user\n"
+        "`/admin unmute @user` — Remove timeout\n"
+        "`/admin nickname @user` — Change nickname\n"
+        "`/admin slowmode #ch <secs>` — Set slowmode\n"
+        "`/admin embed` — Send a custom colored embed\n"
+        "`/admin giveaway` — Start a giveaway 🎉\n"
+        "`/admin roastall` — AI roasts the whole server 🔥\n"
+        "`/admin quiz` — Drop an AI quiz in a channel 🧠"
     ), inline=False)
     embed.set_footer(text="You can also @mention me or DM me to chat!")
     await interaction.response.send_message(embed=embed)
