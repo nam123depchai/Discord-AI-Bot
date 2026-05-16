@@ -6,12 +6,10 @@ Required env vars: DISCORD_BOT_TOKEN, OPENROUTER_API_KEY, GENIUS_ACCESS_TOKEN
 import os
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# Ensure the bot code is on the path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "discord-bot"))
-
-# --- Tiny HTTP listener so Render (and similar hosts) see an open port ---
+# --- Tiny HTTP listener: bind FIRST so Render sees the port immediately ---
 PORT = int(os.environ.get("PORT", 8080))
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -21,17 +19,22 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"Bird Bot is alive!")
     def log_message(self, fmt, *args):
-        pass  # Suppress noisy HTTP logs
+        pass
 
-def start_http():
-    server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
-    server.serve_forever()
+# Bind the socket NOW (before any heavy imports)
+httpd = HTTPServer(("0.0.0.0", PORT), HealthHandler)
+http_thread = threading.Thread(target=httpd.serve_forever, daemon=False)
+http_thread.start()
+print(f"[HTTP] Health check bound to 0.0.0.0:{PORT}")
 
-# Start HTTP server in a background thread
-threading.Thread(target=start_http, daemon=True).start()
+# Give the HTTP server a moment to start listening
+# (Render scans soon after the process starts)
+time.sleep(0.5)
 
-# --- Run the Discord bot (blocks forever) ---
+# --- Discord bot imports (heavy) ---
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "discord-bot"))
 from bot import bot, DISCORD_BOT_TOKEN
 
+# --- Run the Discord bot (blocks the main thread forever) ---
 if __name__ == "__main__":
     bot.run(DISCORD_BOT_TOKEN, log_handler=None)
