@@ -891,25 +891,12 @@ async def slash_help(interaction: discord.Interaction):
     embed.add_field(name="🎵 Music", value=(
         "`/lyrics <song> [artist]` — Find song lyrics via Genius"
     ), inline=False)
-    embed.add_field(name="🔒 Admin — Bot", value=(
-        "`/admin rage <1-10>` — Change bot energy\n"
-        "`/admin status` — Bot stats\n"
+    embed.add_field(name="🔒 Admin Only", value=(
+        "`/admin rage <1-10>` — Change bot energy level\n"
+        "`/admin status` — View bot stats\n"
         "`/admin clearall` — Clear all chat history\n"
-        "`/admin setchannel` — Set auto-reply channel\n"
-        "`/admin say` — Make bot say something"
-    ), inline=False)
-    embed.add_field(name="🔒 Admin — Server", value=(
-        "`/admin announce` — Fancy announcement embed\n"
-        "`/admin poll` — Create a vote poll (up to 4 options)\n"
-        "`/admin purge <n>` — Delete last N messages\n"
-        "`/admin mute @user <mins>` — Timeout a user\n"
-        "`/admin unmute @user` — Remove timeout\n"
-        "`/admin nickname @user` — Change nickname\n"
-        "`/admin slowmode #ch <secs>` — Set slowmode\n"
-        "`/admin embed` — Send a custom colored embed\n"
-        "`/admin giveaway` — Start a giveaway 🎉\n"
-        "`/admin roastall` — AI roasts the whole server 🔥\n"
-        "`/admin quiz` — Drop an AI quiz in a channel 🧠"
+        "`/admin setchannel #channel` — Set auto-reply channel\n"
+        "`/admin say #channel <msg>` — Make bot send a message"
     ), inline=False)
     embed.set_footer(text="You can also @mention me or DM me to chat!")
     await interaction.response.send_message(embed=embed)
