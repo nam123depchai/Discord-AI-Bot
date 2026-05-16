@@ -4,6 +4,9 @@ import logging
 import random
 import time
 import datetime
+import json
+import re
+import io
 from collections import defaultdict
 from openai import OpenAI
 import discord
@@ -35,6 +38,56 @@ GENIUS_HEADERS = {"Authorization": f"Bearer {GENIUS_TOKEN}"}
 
 conversation_history: dict[int, list[dict]] = defaultdict(list)
 START_TIME = time.time()
+
+# ── Economy storage ───────────────────────────────────────────────────────────
+
+ECONOMY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "economy.json")
+
+def eco_load() -> dict:
+    if os.path.exists(ECONOMY_FILE):
+        try:
+            with open(ECONOMY_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def eco_save(data: dict) -> None:
+    with open(ECONOMY_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+def eco_get(user_id: int) -> dict:
+    data = eco_load()
+    uid = str(user_id)
+    if uid not in data:
+        data[uid] = {"coins": 0, "last_daily": 0, "badges": []}
+        eco_save(data)
+    return data[uid]
+
+def eco_add(user_id: int, amount: int) -> int:
+    data = eco_load()
+    uid = str(user_id)
+    if uid not in data:
+        data[uid] = {"coins": 0, "last_daily": 0, "badges": []}
+    data[uid]["coins"] = max(0, data[uid].get("coins", 0) + amount)
+    eco_save(data)
+    return data[uid]["coins"]
+
+# Shop items: name → (cost, emoji, description)
+SHOP_ITEMS: dict[str, tuple[int, str, str]] = {
+    "VIP":       (500,   "🌟", "Shiny VIP role"),
+    "Diamond":   (1000,  "💎", "Sparkling Diamond role"),
+    "King":      (2500,  "👑", "The almighty King/Queen role"),
+    "Legend":    (5000,  "🔥", "Legendary status — flex on everyone"),
+}
+
+def parse_duration(s: str) -> int | None:
+    """Parse '30m', '2h', '1d' etc. → seconds. Returns None if invalid."""
+    m = re.fullmatch(r"(\d+)\s*(s|sec|m|min|h|hr|d|day)s?", s.strip().lower())
+    if not m:
+        return None
+    val, unit = int(m.group(1)), m.group(2)[0]
+    return val * {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
 
 # ── Rage system ───────────────────────────────────────────────────────────────
 
@@ -896,6 +949,434 @@ async def slash_image(interaction: discord.Interaction, prompt: str):
         await interaction.followup.send("❌ Something went wrong generating the image. Please try again!")
 
 
+# ── /imagine ──────────────────────────────────────────────────────────────────
+
+@bot.tree.command(name="imagine", description="Generate an AI portrait of a user based on their name/vibe")
+@app_commands.describe(user="The user to imagine a portrait for")
+async def slash_imagine(interaction: discord.Interaction, user: discord.Member):
+    await interaction.response.defer(thinking=True)
+    try:
+        name = user.display_name
+        prompt = (
+            f"a stunning digital portrait of a person named '{name}', "
+            "cinematic lighting, highly detailed face, fantasy art style, vivid colors, 4k"
+        )
+        safe_prompt = quote(prompt)
+        seed = random.randint(1, 999999)
+        url = (
+            f"https://image.pollinations.ai/prompt/{safe_prompt}"
+            f"?width=512&height=512&seed={seed}&nologo=true&enhance=true"
+        )
+        response = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: req.get(url, timeout=60)
+        )
+        if response.status_code != 200:
+            await interaction.followup.send("❌ Couldn't generate the portrait. Try again!")
+            return
+        image_bytes = io.BytesIO(response.content)
+        image_bytes.seek(0)
+        file = discord.File(fp=image_bytes, filename="portrait.png")
+        embed = discord.Embed(
+            title=f"🎨 AI Portrait of {name}",
+            description=f"Here's what I imagine {user.mention} looks like in a fantasy world!",
+            color=discord.Color.orange()
+        )
+        embed.set_image(url="attachment://portrait.png")
+        embed.set_footer(text="Powered by Pollinations AI • Free & unlimited")
+        await interaction.followup.send(embed=embed, file=file)
+    except Exception as exc:
+        log.exception("Imagine error: %s", exc)
+        await interaction.followup.send("❌ Something went wrong. Please try again!")
+
+
+# ── /meme ─────────────────────────────────────────────────────────────────────
+
+@bot.tree.command(name="meme", description="Generate a meme image with top and bottom text")
+@app_commands.describe(top="Top text", bottom="Bottom text", background="Optional: describe the meme background image")
+async def slash_meme(interaction: discord.Interaction, top: str, bottom: str, background: str = "funny meme template"):
+    await interaction.response.defer(thinking=True)
+    try:
+        prompt = (
+            f"{background}, meme format, funny, bold text at the top saying '{top}' "
+            f"and at the bottom saying '{bottom}', impact font style, high contrast, meme image"
+        )
+        safe_prompt = quote(prompt)
+        seed = random.randint(1, 999999)
+        url = (
+            f"https://image.pollinations.ai/prompt/{safe_prompt}"
+            f"?width=800&height=600&seed={seed}&nologo=true"
+        )
+        response = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: req.get(url, timeout=60)
+        )
+        if response.status_code != 200:
+            await interaction.followup.send("❌ Meme generation failed. Try again!")
+            return
+        image_bytes = io.BytesIO(response.content)
+        image_bytes.seek(0)
+        file = discord.File(fp=image_bytes, filename="meme.png")
+        embed = discord.Embed(
+            title="😂 Meme Generated!",
+            description=f"**Top:** {top}\n**Bottom:** {bottom}",
+            color=discord.Color.yellow()
+        )
+        embed.set_image(url="attachment://meme.png")
+        embed.set_footer(text="Powered by Pollinations AI")
+        await interaction.followup.send(embed=embed, file=file)
+    except Exception as exc:
+        log.exception("Meme error: %s", exc)
+        await interaction.followup.send("❌ Something went wrong. Please try again!")
+
+
+# ── /avatar ───────────────────────────────────────────────────────────────────
+
+AVATAR_STYLES = ["anime", "pixel art", "oil painting", "watercolor", "cyberpunk", "cartoon", "sketch", "3D render"]
+
+@bot.tree.command(name="avatar", description="Reimagine your avatar in a fun art style")
+@app_commands.describe(style="Art style: anime, pixel art, oil painting, watercolor, cyberpunk, cartoon, sketch, 3D render")
+async def slash_avatar(interaction: discord.Interaction, style: str = "anime"):
+    await interaction.response.defer(thinking=True)
+    try:
+        valid = [s for s in AVATAR_STYLES if style.lower() in s.lower()]
+        chosen_style = valid[0] if valid else style
+        name = interaction.user.display_name
+        prompt = (
+            f"a {chosen_style} style avatar/portrait of a person named '{name}', "
+            f"high quality {chosen_style} art, detailed, colorful, profile picture style"
+        )
+        safe_prompt = quote(prompt)
+        seed = random.randint(1, 999999)
+        url = (
+            f"https://image.pollinations.ai/prompt/{safe_prompt}"
+            f"?width=512&height=512&seed={seed}&nologo=true&enhance=true"
+        )
+        response = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: req.get(url, timeout=60)
+        )
+        if response.status_code != 200:
+            await interaction.followup.send("❌ Avatar generation failed. Try again!")
+            return
+        image_bytes = io.BytesIO(response.content)
+        image_bytes.seek(0)
+        file = discord.File(fp=image_bytes, filename="avatar.png")
+        embed = discord.Embed(
+            title=f"✨ {interaction.user.display_name}'s {chosen_style.title()} Avatar",
+            description=f"Here's your profile picture reimagined in **{chosen_style}** style!",
+            color=discord.Color.teal()
+        )
+        embed.set_image(url="attachment://avatar.png")
+        embed.set_footer(text=f"Style: {chosen_style} • Powered by Pollinations AI")
+        await interaction.followup.send(embed=embed, file=file)
+    except Exception as exc:
+        log.exception("Avatar error: %s", exc)
+        await interaction.followup.send("❌ Something went wrong. Please try again!")
+
+
+# ── /daily ────────────────────────────────────────────────────────────────────
+
+@bot.tree.command(name="daily", description="Claim your daily coins! 💰")
+async def slash_daily(interaction: discord.Interaction):
+    uid = interaction.user.id
+    data = eco_load()
+    key = str(uid)
+    now = time.time()
+    user_data = data.get(key, {"coins": 0, "last_daily": 0, "badges": []})
+    last = user_data.get("last_daily", 0)
+    cooldown = 86400  # 24 hours
+    elapsed = now - last
+    if elapsed < cooldown:
+        remaining = cooldown - elapsed
+        hours, rem = divmod(int(remaining), 3600)
+        minutes = rem // 60
+        await interaction.response.send_message(
+            f"⏳ You already claimed today! Come back in **{hours}h {minutes}m**.",
+            ephemeral=True
+        )
+        return
+    bonus = random.randint(80, 150)
+    user_data["coins"] = user_data.get("coins", 0) + bonus
+    user_data["last_daily"] = now
+    if key not in data:
+        user_data["badges"] = []
+    data[key] = user_data
+    eco_save(data)
+    embed = discord.Embed(
+        title="💰 Daily Coins Claimed!",
+        description=f"**+{bonus} coins** added to your wallet!\nYou now have **{user_data['coins']} coins** 🪙",
+        color=discord.Color.gold()
+    )
+    embed.set_footer(text="Come back in 24 hours for more!")
+    await interaction.response.send_message(embed=embed)
+
+
+# ── /balance ──────────────────────────────────────────────────────────────────
+
+@bot.tree.command(name="balance", description="Check your coin balance (or someone else's)")
+@app_commands.describe(user="User to check (leave blank for yourself)")
+async def slash_balance(interaction: discord.Interaction, user: discord.Member | None = None):
+    target = user or interaction.user
+    profile = eco_get(target.id)
+    coins = profile.get("coins", 0)
+    badges = profile.get("badges", [])
+    badge_str = " ".join(badges) if badges else "None yet"
+    embed = discord.Embed(
+        title=f"💼 {target.display_name}'s Wallet",
+        color=discord.Color.gold()
+    )
+    embed.add_field(name="🪙 Coins", value=f"**{coins}**", inline=True)
+    embed.add_field(name="🏅 Badges", value=badge_str, inline=True)
+    embed.set_thumbnail(url=target.display_avatar.url)
+    await interaction.response.send_message(embed=embed)
+
+
+# ── /gamble ───────────────────────────────────────────────────────────────────
+
+SLOT_EMOJIS = ["🍒", "🍋", "🍊", "🍇", "⭐", "💎", "7️⃣"]
+
+@bot.tree.command(name="gamble", description="Spin the slots and gamble your coins! 🎰")
+@app_commands.describe(amount="How many coins to bet")
+async def slash_gamble(interaction: discord.Interaction, amount: int):
+    if amount <= 0:
+        await interaction.response.send_message("❌ Bet at least 1 coin!", ephemeral=True)
+        return
+    profile = eco_get(interaction.user.id)
+    coins = profile.get("coins", 0)
+    if amount > coins:
+        await interaction.response.send_message(
+            f"❌ You only have **{coins} coins**. You can't bet more than you have!",
+            ephemeral=True
+        )
+        return
+    slots = [random.choice(SLOT_EMOJIS) for _ in range(3)]
+    slot_display = " | ".join(slots)
+    if slots[0] == slots[1] == slots[2]:
+        if slots[0] == "💎":
+            mult, result, color = 10, "JACKPOT!! 💎💎💎", discord.Color.blue()
+        elif slots[0] == "7️⃣":
+            mult, result, color = 5, "BIG WIN! 7️⃣7️⃣7️⃣", discord.Color.gold()
+        else:
+            mult, result, color = 3, "Winner! 🎉", discord.Color.green()
+        winnings = amount * mult
+        new_bal = eco_add(interaction.user.id, winnings - amount)
+        desc = f"[ {slot_display} ]\n\n**{result}**\nYou won **+{winnings} coins**! (×{mult})\nBalance: **{new_bal} coins**"
+    elif slots[0] == slots[1] or slots[1] == slots[2] or slots[0] == slots[2]:
+        winnings = amount
+        new_bal = eco_add(interaction.user.id, 0)  # break even
+        result, color = "Almost! You break even.", discord.Color.orange()
+        desc = f"[ {slot_display} ]\n\n**{result}**\nBalance: **{coins} coins**"
+    else:
+        new_bal = eco_add(interaction.user.id, -amount)
+        result, color = "You lost 😢", discord.Color.red()
+        desc = f"[ {slot_display} ]\n\n**{result}**\nYou lost **{amount} coins**.\nBalance: **{new_bal} coins**"
+    embed = discord.Embed(title="🎰 Slot Machine", description=desc, color=color)
+    await interaction.response.send_message(embed=embed)
+
+
+# ── /leaderboard ──────────────────────────────────────────────────────────────
+
+@bot.tree.command(name="leaderboard", description="See the richest users in the economy 💰")
+async def slash_leaderboard(interaction: discord.Interaction):
+    data = eco_load()
+    if not data:
+        await interaction.response.send_message("No economy data yet! Use `/daily` to get started.", ephemeral=True)
+        return
+    sorted_users = sorted(data.items(), key=lambda x: x[1].get("coins", 0), reverse=True)[:10]
+    medals = ["🥇", "🥈", "🥉"] + ["🏅"] * 7
+    lines = []
+    for i, (uid, udata) in enumerate(sorted_users):
+        try:
+            member = interaction.guild.get_member(int(uid))
+            name = member.display_name if member else f"User#{uid[-4:]}"
+        except Exception:
+            name = f"User#{uid[-4:]}"
+        coins = udata.get("coins", 0)
+        lines.append(f"{medals[i]} **{name}** — {coins} 🪙")
+    embed = discord.Embed(
+        title="🏆 Coin Leaderboard",
+        description="\n".join(lines),
+        color=discord.Color.gold()
+    )
+    embed.set_footer(text="Use /daily and /gamble to earn coins!")
+    await interaction.response.send_message(embed=embed)
+
+
+# ── /shop ─────────────────────────────────────────────────────────────────────
+
+@bot.tree.command(name="shop", description="Buy special roles with your coins! 🛒")
+@app_commands.describe(item="Item to buy (leave blank to browse the shop)")
+async def slash_shop(interaction: discord.Interaction, item: str | None = None):
+    if item is None:
+        embed = discord.Embed(title="🛒 Coin Shop", color=discord.Color.blurple())
+        embed.description = "Use `/shop item:<name>` to buy an item!\n\n"
+        for name, (cost, emoji, desc) in SHOP_ITEMS.items():
+            embed.add_field(name=f"{emoji} {name} — {cost} 🪙", value=desc, inline=False)
+        embed.set_footer(text="Earn coins with /daily and /gamble!")
+        await interaction.response.send_message(embed=embed)
+        return
+    match = next((k for k in SHOP_ITEMS if k.lower() == item.lower()), None)
+    if not match:
+        items_list = ", ".join(SHOP_ITEMS.keys())
+        await interaction.response.send_message(
+            f"❌ Item not found! Available items: {items_list}", ephemeral=True
+        )
+        return
+    cost, emoji, desc = SHOP_ITEMS[match]
+    profile = eco_get(interaction.user.id)
+    coins = profile.get("coins", 0)
+    if coins < cost:
+        await interaction.response.send_message(
+            f"❌ You need **{cost} coins** but only have **{coins}**. Keep grinding! 💪",
+            ephemeral=True
+        )
+        return
+    # Try to give/create the role
+    guild = interaction.guild
+    role = discord.utils.get(guild.roles, name=match)
+    if role is None:
+        try:
+            colors_map = {"VIP": 0xFFD700, "Diamond": 0x00BFFF, "King": 0x9B59B6, "Legend": 0xFF4500}
+            role = await guild.create_role(
+                name=match,
+                color=discord.Color(colors_map.get(match, 0xFFFFFF)),
+                reason="Shop purchase"
+            )
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                "❌ I don't have permission to create/manage roles. Ask an admin to give me that permission!",
+                ephemeral=True
+            )
+            return
+    try:
+        await interaction.user.add_roles(role, reason="Shop purchase")
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            "❌ I don't have permission to assign roles. Ask an admin to move my role higher!",
+            ephemeral=True
+        )
+        return
+    eco_add(interaction.user.id, -cost)
+    data = eco_load()
+    uid = str(interaction.user.id)
+    if "badges" not in data[uid]:
+        data[uid]["badges"] = []
+    if emoji not in data[uid]["badges"]:
+        data[uid]["badges"].append(emoji)
+    eco_save(data)
+    embed = discord.Embed(
+        title="✅ Purchase Successful!",
+        description=f"You bought **{emoji} {match}** for **{cost} coins**!\nYou now have the role {role.mention}.",
+        color=discord.Color.green()
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+# ── /remindme ─────────────────────────────────────────────────────────────────
+
+@bot.tree.command(name="remindme", description="Set a reminder — bot will DM you! ⏰")
+@app_commands.describe(
+    duration="When to remind you (e.g. 30m, 2h, 1d)",
+    message="What to remind you about"
+)
+async def slash_remindme(interaction: discord.Interaction, duration: str, message: str):
+    secs = parse_duration(duration)
+    if secs is None or secs <= 0:
+        await interaction.response.send_message(
+            "❌ Invalid duration! Use formats like `30m`, `2h`, `1d`.",
+            ephemeral=True
+        )
+        return
+    if secs > 86400 * 7:
+        await interaction.response.send_message("❌ Maximum reminder time is 7 days.", ephemeral=True)
+        return
+    user = interaction.user
+    await interaction.response.send_message(
+        f"⏰ Got it! I'll DM you in **{duration}** about: *{message}*", ephemeral=True
+    )
+    async def send_reminder():
+        await asyncio.sleep(secs)
+        try:
+            embed = discord.Embed(
+                title="⏰ Reminder!",
+                description=message,
+                color=discord.Color.blurple(),
+                timestamp=datetime.datetime.utcnow()
+            )
+            embed.set_footer(text=f"You asked me to remind you {duration} ago")
+            await user.send(embed=embed)
+        except Exception:
+            pass
+    asyncio.create_task(send_reminder())
+
+
+# ── /poll (quick yes/no) ──────────────────────────────────────────────────────
+
+@bot.tree.command(name="poll", description="Create a quick yes/no poll 📊")
+@app_commands.describe(question="The poll question")
+async def slash_poll(interaction: discord.Interaction, question: str):
+    embed = discord.Embed(
+        title="📊 Poll",
+        description=f"**{question}**",
+        color=discord.Color.blurple(),
+        timestamp=datetime.datetime.utcnow()
+    )
+    embed.set_footer(text=f"Poll by {interaction.user.display_name}")
+    await interaction.response.send_message(embed=embed)
+    msg = await interaction.original_response()
+    await msg.add_reaction("✅")
+    await msg.add_reaction("❌")
+
+
+# ── /translate ────────────────────────────────────────────────────────────────
+
+@bot.tree.command(name="translate", description="Translate text to any language using AI 🌐")
+@app_commands.describe(text="Text to translate", language="Target language (e.g. Spanish, Japanese, French)")
+async def slash_translate(interaction: discord.Interaction, text: str, language: str = "English"):
+    await interaction.response.defer(thinking=True)
+    try:
+        result = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: ask_ai_once(
+                f"Translate the following text to {language}. "
+                f"Reply with ONLY the translated text, no explanations:\n\n{text}"
+            )
+        )
+        embed = discord.Embed(
+            title=f"🌐 Translated to {language}",
+            color=discord.Color.blue()
+        )
+        embed.add_field(name="Original", value=text[:1000], inline=False)
+        embed.add_field(name="Translation", value=result[:1000], inline=False)
+        await interaction.followup.send(embed=embed)
+    except Exception as exc:
+        log.exception("Translate error: %s", exc)
+        await interaction.followup.send("❌ Translation failed. Please try again!")
+
+
+# ── /summarize ────────────────────────────────────────────────────────────────
+
+@bot.tree.command(name="summarize", description="AI summarizes any long text 📝")
+@app_commands.describe(text="The text you want summarized")
+async def slash_summarize(interaction: discord.Interaction, text: str):
+    await interaction.response.defer(thinking=True)
+    try:
+        result = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: ask_ai_once(
+                f"Summarize the following text in 3-5 bullet points. Be concise and clear:\n\n{text}"
+            )
+        )
+        embed = discord.Embed(
+            title="📝 Summary",
+            description=result[:4000],
+            color=discord.Color.green()
+        )
+        embed.set_footer(text=f"Summarized {len(text)} characters → {len(result)} characters")
+        await interaction.followup.send(embed=embed)
+    except Exception as exc:
+        log.exception("Summarize error: %s", exc)
+        await interaction.followup.send("❌ Summarization failed. Please try again!")
+
+
 # ── /help ─────────────────────────────────────────────────────────────────────
 
 @bot.tree.command(name="help", description="See all available commands")
@@ -930,17 +1411,38 @@ async def slash_help(interaction: discord.Interaction):
         "`/advice [situation]` — Life advice"
     ), inline=False)
     embed.add_field(name="🎨 Image", value=(
-        "`/image <prompt>` — Generate an AI image (free, unlimited!)"
+        "`/image <prompt>` — Generate an AI image\n"
+        "`/imagine @user` — AI portrait of a user\n"
+        "`/meme <top> <bottom>` — Generate a meme\n"
+        "`/avatar [style]` — Reimagine your avatar"
     ), inline=False)
     embed.add_field(name="🎵 Music", value=(
         "`/lyrics <song> [artist]` — Find song lyrics via Genius"
+    ), inline=False)
+    embed.add_field(name="💰 Economy", value=(
+        "`/daily` — Claim daily coins\n"
+        "`/balance [@user]` — Check wallet\n"
+        "`/gamble <amount>` — Spin the slots 🎰\n"
+        "`/leaderboard` — Richest users\n"
+        "`/shop [item]` — Buy roles with coins"
+    ), inline=False)
+    embed.add_field(name="📊 Tools", value=(
+        "`/poll <question>` — Quick yes/no poll\n"
+        "`/remindme <time> <msg>` — Set a DM reminder\n"
+        "`/translate <text> [lang]` — Translate anything\n"
+        "`/summarize <text>` — AI summary"
     ), inline=False)
     embed.add_field(name="🔒 Admin Only", value=(
         "`/admin rage <1-10>` — Change bot energy level\n"
         "`/admin status` — View bot stats\n"
         "`/admin clearall` — Clear all chat history\n"
-        "`/admin setchannel #channel` — Set auto-reply channel\n"
-        "`/admin say #channel <msg>` — Make bot send a message"
+        "`/admin setchannel` — Set auto-reply channel\n"
+        "`/admin say` — Make bot say something\n"
+        "`/admin announce` — Fancy announcement\n"
+        "`/admin poll` — Multi-option poll\n"
+        "`/admin purge` — Delete messages\n"
+        "`/admin mute/unmute` — Timeout users\n"
+        "`/admin giveaway` — Start a giveaway 🎉"
     ), inline=False)
     embed.set_footer(text="You can also @mention me or DM me to chat!")
     await interaction.response.send_message(embed=embed)
