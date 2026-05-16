@@ -855,6 +855,47 @@ async def slash_lyrics(interaction: discord.Interaction, song: str, artist: str 
         await interaction.channel.send(f"{label}```{chunk}```")
 
 
+# ── /image ────────────────────────────────────────────────────────────────────
+
+@bot.tree.command(name="image", description="Generate an AI image from a text prompt (free, no limits!)")
+@app_commands.describe(prompt="Describe the image you want to generate")
+async def slash_image(interaction: discord.Interaction, prompt: str):
+    await interaction.response.defer(thinking=True)
+    try:
+        safe_prompt = quote(prompt)
+        seed = random.randint(1, 999999)
+        url = (
+            f"https://image.pollinations.ai/prompt/{safe_prompt}"
+            f"?width=1024&height=1024&seed={seed}&nologo=true&enhance=true"
+        )
+        # Fetch the image bytes
+        response = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: req.get(url, timeout=60)
+        )
+        if response.status_code != 200:
+            await interaction.followup.send("❌ Image generation failed. Try a different prompt!")
+            return
+
+        import io
+        image_bytes = io.BytesIO(response.content)
+        image_bytes.seek(0)
+        file = discord.File(fp=image_bytes, filename="image.png")
+
+        embed = discord.Embed(
+            title="🎨 AI Image Generated",
+            description=f"**Prompt:** {prompt}",
+            color=discord.Color.purple()
+        )
+        embed.set_image(url="attachment://image.png")
+        embed.set_footer(text="Powered by Pollinations AI • Free & unlimited")
+        await interaction.followup.send(embed=embed, file=file)
+
+    except Exception as exc:
+        log.exception("Image generation error: %s", exc)
+        await interaction.followup.send("❌ Something went wrong generating the image. Please try again!")
+
+
 # ── /help ─────────────────────────────────────────────────────────────────────
 
 @bot.tree.command(name="help", description="See all available commands")
@@ -887,6 +928,9 @@ async def slash_help(interaction: discord.Interaction):
         "`/fact [topic]` — Random fact\n"
         "`/story <topic>` — Short story\n"
         "`/advice [situation]` — Life advice"
+    ), inline=False)
+    embed.add_field(name="🎨 Image", value=(
+        "`/image <prompt>` — Generate an AI image (free, unlimited!)"
     ), inline=False)
     embed.add_field(name="🎵 Music", value=(
         "`/lyrics <song> [artist]` — Find song lyrics via Genius"
