@@ -13,11 +13,18 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 PORT = int(os.environ.get("PORT", 8080))
 
 class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
+    def _ok(self):
         self.send_response(200)
         self.send_header("Content-Type", "text/plain")
         self.end_headers()
+
+    def do_GET(self):
+        self._ok()
         self.wfile.write(b"Bird Bot is alive!")
+
+    def do_HEAD(self):
+        self._ok()
+
     def log_message(self, fmt, *args):
         pass
 
