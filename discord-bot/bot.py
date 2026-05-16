@@ -43,6 +43,17 @@ START_TIME = time.time()
 
 ECONOMY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "economy.json")
 
+_ECO_DEFAULT_SETTINGS = {
+    "daily_min": 80, "daily_max": 150,
+    "work_min": 50,  "work_max": 120,
+    "work_cooldown": 3600,
+    "rob_chance": 40, "rob_fine": 30,
+}
+_ECO_USER_DEFAULT = {
+    "coins": 0, "last_daily": 0, "last_work": 0, "last_rob": 0,
+    "badges": [], "total_earned": 0, "total_lost": 0,
+}
+
 def eco_load() -> dict:
     if os.path.exists(ECONOMY_FILE):
         try:
@@ -56,20 +67,48 @@ def eco_save(data: dict) -> None:
     with open(ECONOMY_FILE, "w") as f:
         json.dump(data, f, indent=2)
 
+def eco_settings() -> dict:
+    return eco_load().get("__settings__", dict(_ECO_DEFAULT_SETTINGS))
+
+def eco_save_settings(s: dict) -> None:
+    data = eco_load()
+    data["__settings__"] = s
+    eco_save(data)
+
 def eco_get(user_id: int) -> dict:
     data = eco_load()
     uid = str(user_id)
     if uid not in data:
-        data[uid] = {"coins": 0, "last_daily": 0, "badges": []}
+        data[uid] = dict(_ECO_USER_DEFAULT)
         eco_save(data)
+    else:
+        # backfill new keys for older users
+        for k, v in _ECO_USER_DEFAULT.items():
+            data[uid].setdefault(k, v)
+    return data[uid]
+
+def eco_update(user_id: int, **kwargs) -> dict:
+    """Update specific fields of a user's economy record."""
+    data = eco_load()
+    uid = str(user_id)
+    if uid not in data:
+        data[uid] = dict(_ECO_USER_DEFAULT)
+    for k, v in kwargs.items():
+        data[uid][k] = v
+    eco_save(data)
     return data[uid]
 
 def eco_add(user_id: int, amount: int) -> int:
     data = eco_load()
     uid = str(user_id)
     if uid not in data:
-        data[uid] = {"coins": 0, "last_daily": 0, "badges": []}
-    data[uid]["coins"] = max(0, data[uid].get("coins", 0) + amount)
+        data[uid] = dict(_ECO_USER_DEFAULT)
+    old = data[uid].get("coins", 0)
+    data[uid]["coins"] = max(0, old + amount)
+    if amount > 0:
+        data[uid]["total_earned"] = data[uid].get("total_earned", 0) + amount
+    else:
+        data[uid]["total_lost"] = data[uid].get("total_lost", 0) + abs(amount)
     eco_save(data)
     return data[uid]["coins"]
 
@@ -88,6 +127,8 @@ def parse_duration(s: str) -> int | None:
         return None
     val, unit = int(m.group(1)), m.group(2)[0]
     return val * {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
+
+BOT_OWNER_ID: int | None = None
 
 # ── Rage system ───────────────────────────────────────────────────────────────
 
@@ -208,19 +249,23 @@ async def reply_long(message: discord.Message, text: str) -> None:
 intents = discord.Intents.default()
 intents.message_content = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix="b ", intents=intents, help_command=None)
 
 AUTO_REPLY_CHANNEL_ID: int = 1492160189489741858
 
 
 @bot.event
 async def on_ready():
+    global BOT_OWNER_ID
+    info = await bot.application_info()
+    BOT_OWNER_ID = info.owner.id
     for guild in bot.guilds:
         bot.tree.copy_global_to(guild=guild)
         await bot.tree.sync(guild=guild)
     bot.tree.clear_commands(guild=None)
     await bot.tree.sync()
-    log.info("Logged in as %s (ID: %s) — synced to %d guild(s)!", bot.user, bot.user.id, len(bot.guilds))
+    log.info("Logged in as %s (ID: %s) — synced to %d guild(s)! Owner: %d",
+             bot.user, bot.user.id, len(bot.guilds), BOT_OWNER_ID)
 
 
 @bot.event
@@ -1377,6 +1422,526 @@ async def slash_summarize(interaction: discord.Interaction, text: str):
         await interaction.followup.send("❌ Summarization failed. Please try again!")
 
 
+# ── More admin commands ───────────────────────────────────────────────────────
+
+@admin_group.command(name="kick", description="Kick a member from the server")
+@app_commands.describe(member="Member to kick", reason="Reason for kick")
+async def admin_kick(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
+    try:
+        await member.kick(reason=reason)
+        await interaction.response.send_message(f"👢 **{member.display_name}** has been kicked. Reason: {reason}")
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ I don't have permission to kick this member.", ephemeral=True)
+
+@admin_group.command(name="ban", description="Ban a member from the server")
+@app_commands.describe(member="Member to ban", reason="Reason for ban", delete_days="Days of messages to delete (0-7)")
+async def admin_ban(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided", delete_days: int = 0):
+    try:
+        await member.ban(reason=reason, delete_message_days=min(max(delete_days, 0), 7))
+        await interaction.response.send_message(f"🔨 **{member.display_name}** has been banned. Reason: {reason}")
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ I don't have permission to ban this member.", ephemeral=True)
+
+@admin_group.command(name="unban", description="Unban a user by their ID")
+@app_commands.describe(user_id="The Discord user ID to unban")
+async def admin_unban(interaction: discord.Interaction, user_id: str):
+    try:
+        user = await bot.fetch_user(int(user_id))
+        await interaction.guild.unban(user)
+        await interaction.response.send_message(f"✅ **{user.name}** has been unbanned.")
+    except Exception:
+        await interaction.response.send_message("❌ Could not unban that user. Check the ID.", ephemeral=True)
+
+@admin_group.command(name="serverinfo", description="Show detailed server information")
+async def admin_serverinfo(interaction: discord.Interaction):
+    g = interaction.guild
+    bots = sum(1 for m in g.members if m.bot)
+    humans = g.member_count - bots
+    embed = discord.Embed(title=f"📊 {g.name}", color=discord.Color.blurple(), timestamp=datetime.datetime.utcnow())
+    if g.icon:
+        embed.set_thumbnail(url=g.icon.url)
+    embed.add_field(name="👑 Owner", value=f"<@{g.owner_id}>", inline=True)
+    embed.add_field(name="📅 Created", value=g.created_at.strftime("%b %d, %Y"), inline=True)
+    embed.add_field(name="🆔 Server ID", value=str(g.id), inline=True)
+    embed.add_field(name="👥 Members", value=f"{humans} humans, {bots} bots", inline=True)
+    embed.add_field(name="💬 Channels", value=f"{len(g.text_channels)} text, {len(g.voice_channels)} voice", inline=True)
+    embed.add_field(name="🎭 Roles", value=str(len(g.roles)), inline=True)
+    embed.add_field(name="🚀 Boost Level", value=f"Level {g.premium_tier} ({g.premium_subscription_count} boosts)", inline=True)
+    embed.add_field(name="😀 Emojis", value=str(len(g.emojis)), inline=True)
+    await interaction.response.send_message(embed=embed)
+
+@admin_group.command(name="coinsgive", description="Give coins to a user (admin cheat)")
+@app_commands.describe(user="Target user", amount="Coins to give")
+async def admin_coinsgive(interaction: discord.Interaction, user: discord.Member, amount: int):
+    new_bal = eco_add(user.id, amount)
+    await interaction.response.send_message(
+        f"✅ Gave **{amount} coins** to {user.mention}. New balance: **{new_bal} coins**"
+    )
+
+@admin_group.command(name="coinsreset", description="Reset a user's coin balance to 0")
+@app_commands.describe(user="Target user")
+async def admin_coinsreset(interaction: discord.Interaction, user: discord.Member):
+    eco_update(user.id, coins=0)
+    await interaction.response.send_message(f"✅ Reset {user.mention}'s balance to **0 coins**.")
+
+
+# ── /owner (bot owner only) ───────────────────────────────────────────────────
+
+owner_group = app_commands.Group(name="owner", description="Bot owner only commands")
+
+def is_owner(interaction: discord.Interaction) -> bool:
+    return interaction.user.id == BOT_OWNER_ID
+
+@owner_group.command(name="settings", description="View current economy settings")
+async def owner_settings(interaction: discord.Interaction):
+    if not is_owner(interaction):
+        await interaction.response.send_message("❌ Owner only.", ephemeral=True); return
+    s = eco_settings()
+    embed = discord.Embed(title="⚙️ Economy Settings", color=discord.Color.orange())
+    for k, v in s.items():
+        embed.add_field(name=k, value=str(v), inline=True)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@owner_group.command(name="setdaily", description="Set the daily coins range")
+@app_commands.describe(min_coins="Minimum daily coins", max_coins="Maximum daily coins")
+async def owner_setdaily(interaction: discord.Interaction, min_coins: int, max_coins: int):
+    if not is_owner(interaction):
+        await interaction.response.send_message("❌ Owner only.", ephemeral=True); return
+    s = eco_settings()
+    s["daily_min"] = min_coins
+    s["daily_max"] = max_coins
+    eco_save_settings(s)
+    await interaction.response.send_message(f"✅ Daily range set to **{min_coins}–{max_coins} coins**.", ephemeral=True)
+
+@owner_group.command(name="setwork", description="Set the work coins range and cooldown")
+@app_commands.describe(min_coins="Min work coins", max_coins="Max work coins", cooldown_mins="Cooldown in minutes")
+async def owner_setwork(interaction: discord.Interaction, min_coins: int, max_coins: int, cooldown_mins: int = 60):
+    if not is_owner(interaction):
+        await interaction.response.send_message("❌ Owner only.", ephemeral=True); return
+    s = eco_settings()
+    s["work_min"] = min_coins
+    s["work_max"] = max_coins
+    s["work_cooldown"] = cooldown_mins * 60
+    eco_save_settings(s)
+    await interaction.response.send_message(
+        f"✅ Work: **{min_coins}–{max_coins} coins**, cooldown **{cooldown_mins}m**.", ephemeral=True)
+
+@owner_group.command(name="setrob", description="Set rob success chance and fine %")
+@app_commands.describe(chance="Success chance 0-100", fine_pct="Fine % of stolen if caught (0-100)")
+async def owner_setrob(interaction: discord.Interaction, chance: int, fine_pct: int):
+    if not is_owner(interaction):
+        await interaction.response.send_message("❌ Owner only.", ephemeral=True); return
+    s = eco_settings()
+    s["rob_chance"] = max(0, min(100, chance))
+    s["rob_fine"] = max(0, min(100, fine_pct))
+    eco_save_settings(s)
+    await interaction.response.send_message(
+        f"✅ Rob chance: **{s['rob_chance']}%**, fine: **{s['rob_fine']}%**.", ephemeral=True)
+
+@owner_group.command(name="give", description="Give coins to any user")
+@app_commands.describe(user="Target user", amount="Amount of coins")
+async def owner_give(interaction: discord.Interaction, user: discord.Member, amount: int):
+    if not is_owner(interaction):
+        await interaction.response.send_message("❌ Owner only.", ephemeral=True); return
+    new_bal = eco_add(user.id, amount)
+    await interaction.response.send_message(f"✅ Gave **{amount}** coins to {user.mention}. Balance: **{new_bal}**", ephemeral=True)
+
+@owner_group.command(name="setbalance", description="Set a user's exact coin balance")
+@app_commands.describe(user="Target user", amount="Exact balance to set")
+async def owner_setbalance(interaction: discord.Interaction, user: discord.Member, amount: int):
+    if not is_owner(interaction):
+        await interaction.response.send_message("❌ Owner only.", ephemeral=True); return
+    eco_update(user.id, coins=max(0, amount))
+    await interaction.response.send_message(f"✅ Set {user.mention}'s balance to **{amount} coins**.", ephemeral=True)
+
+@owner_group.command(name="reset", description="Reset a user's entire economy profile")
+@app_commands.describe(user="Target user")
+async def owner_reset(interaction: discord.Interaction, user: discord.Member):
+    if not is_owner(interaction):
+        await interaction.response.send_message("❌ Owner only.", ephemeral=True); return
+    eco_update(user.id, **_ECO_USER_DEFAULT)
+    await interaction.response.send_message(f"✅ Reset {user.mention}'s economy profile.", ephemeral=True)
+
+@owner_group.command(name="resetall", description="⚠️ Wipe ALL economy data")
+async def owner_resetall(interaction: discord.Interaction):
+    if not is_owner(interaction):
+        await interaction.response.send_message("❌ Owner only.", ephemeral=True); return
+    settings = eco_settings()
+    eco_save({"__settings__": settings})
+    await interaction.response.send_message("✅ All economy data wiped (settings preserved).", ephemeral=True)
+
+bot.tree.add_command(owner_group)
+
+
+# ── /give ─────────────────────────────────────────────────────────────────────
+
+@bot.tree.command(name="give", description="Give some of your coins to another user 🎁")
+@app_commands.describe(user="Who to give coins to", amount="How many coins to give")
+async def slash_give(interaction: discord.Interaction, user: discord.Member, amount: int):
+    if user.id == interaction.user.id:
+        await interaction.response.send_message("❌ You can't give coins to yourself!", ephemeral=True); return
+    if user.bot:
+        await interaction.response.send_message("❌ You can't give coins to a bot!", ephemeral=True); return
+    if amount <= 0:
+        await interaction.response.send_message("❌ Amount must be positive!", ephemeral=True); return
+    profile = eco_get(interaction.user.id)
+    if profile["coins"] < amount:
+        await interaction.response.send_message(
+            f"❌ You only have **{profile['coins']} coins**!", ephemeral=True); return
+    eco_add(interaction.user.id, -amount)
+    eco_add(user.id, amount)
+    embed = discord.Embed(
+        title="🎁 Coins Gifted!",
+        description=f"{interaction.user.mention} gave **{amount} coins** to {user.mention}!",
+        color=discord.Color.green()
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+# ── /work ─────────────────────────────────────────────────────────────────────
+
+WORK_JOBS = [
+    "delivered pizzas 🍕", "walked dogs 🐕", "coded a website 💻",
+    "fixed a bug 🐛", "mowed lawns 🌿", "washed cars 🚗",
+    "babysat kids 👶", "wrote an essay ✍️", "sold lemonade 🍋",
+    "streamed on Twitch 🎮", "drove Uber 🚕", "tutored students 📚",
+]
+
+@bot.tree.command(name="work", description="Work to earn coins! Has a cooldown ⏱️")
+async def slash_work(interaction: discord.Interaction):
+    s = eco_settings()
+    profile = eco_get(interaction.user.id)
+    now = time.time()
+    elapsed = now - profile.get("last_work", 0)
+    cooldown = s["work_cooldown"]
+    if elapsed < cooldown:
+        remaining = cooldown - elapsed
+        mins = int(remaining // 60)
+        secs = int(remaining % 60)
+        await interaction.response.send_message(
+            f"⏳ You're tired! Rest for **{mins}m {secs}s** before working again.", ephemeral=True); return
+    earned = random.randint(s["work_min"], s["work_max"])
+    job = random.choice(WORK_JOBS)
+    new_bal = eco_add(interaction.user.id, earned)
+    eco_update(interaction.user.id, last_work=now)
+    embed = discord.Embed(
+        title="💼 Work Complete!",
+        description=f"You {job} and earned **+{earned} coins**!\nBalance: **{new_bal} coins** 🪙",
+        color=discord.Color.green()
+    )
+    embed.set_footer(text=f"Come back in {cooldown // 60} minutes to work again!")
+    await interaction.response.send_message(embed=embed)
+
+
+# ── /rob ──────────────────────────────────────────────────────────────────────
+
+@bot.tree.command(name="rob", description="Try to rob someone's coins! Risky 🦹")
+@app_commands.describe(user="Who to rob")
+async def slash_rob(interaction: discord.Interaction, user: discord.Member):
+    if user.id == interaction.user.id:
+        await interaction.response.send_message("❌ You can't rob yourself!", ephemeral=True); return
+    if user.bot:
+        await interaction.response.send_message("❌ You can't rob a bot!", ephemeral=True); return
+    s = eco_settings()
+    robber_profile = eco_get(interaction.user.id)
+    victim_profile = eco_get(user.id)
+    now = time.time()
+    elapsed = now - robber_profile.get("last_rob", 0)
+    if elapsed < 3600:
+        mins = int((3600 - elapsed) // 60)
+        await interaction.response.send_message(
+            f"⏳ You're lying low after your last job. Wait **{mins}m**.", ephemeral=True); return
+    if victim_profile["coins"] < 50:
+        await interaction.response.send_message(
+            f"❌ {user.display_name} is broke (< 50 coins). Not worth the risk!", ephemeral=True); return
+    eco_update(interaction.user.id, last_rob=now)
+    if random.randint(1, 100) <= s["rob_chance"]:
+        steal = random.randint(10, min(200, victim_profile["coins"] // 2 or 10))
+        eco_add(user.id, -steal)
+        eco_add(interaction.user.id, steal)
+        embed = discord.Embed(
+            title="🦹 Robbery Success!",
+            description=f"You sneaked into {user.mention}'s wallet and stole **{steal} coins**! 💰",
+            color=discord.Color.green()
+        )
+    else:
+        fine = int(robber_profile["coins"] * s["rob_fine"] / 100)
+        fine = max(fine, 0)
+        eco_add(interaction.user.id, -fine)
+        embed = discord.Embed(
+            title="👮 Caught Red-Handed!",
+            description=f"You got caught trying to rob {user.mention}!\nYou paid **{fine} coins** as a fine. 😬",
+            color=discord.Color.red()
+        )
+    await interaction.response.send_message(embed=embed)
+
+
+# ── /coinflip ─────────────────────────────────────────────────────────────────
+
+@bot.tree.command(name="coinflip", description="Bet coins on a coin flip 🪙")
+@app_commands.describe(amount="Amount to bet", choice="heads or tails")
+@app_commands.choices(choice=[
+    app_commands.Choice(name="Heads", value="heads"),
+    app_commands.Choice(name="Tails", value="tails"),
+])
+async def slash_coinflip(interaction: discord.Interaction, amount: int, choice: str):
+    if amount <= 0:
+        await interaction.response.send_message("❌ Bet at least 1 coin!", ephemeral=True); return
+    profile = eco_get(interaction.user.id)
+    if profile["coins"] < amount:
+        await interaction.response.send_message(
+            f"❌ You only have **{profile['coins']} coins**!", ephemeral=True); return
+    result = random.choice(["heads", "tails"])
+    flip_emoji = "🪙 HEADS" if result == "heads" else "🪙 TAILS"
+    if result == choice:
+        new_bal = eco_add(interaction.user.id, amount)
+        embed = discord.Embed(
+            title=f"🎉 {flip_emoji} — You WIN!",
+            description=f"You bet on **{choice}** and won **+{amount} coins**!\nBalance: **{new_bal} coins**",
+            color=discord.Color.green()
+        )
+    else:
+        new_bal = eco_add(interaction.user.id, -amount)
+        embed = discord.Embed(
+            title=f"😢 {flip_emoji} — You LOSE!",
+            description=f"You bet on **{choice}** but it was **{result}**.\nYou lost **{amount} coins**.\nBalance: **{new_bal} coins**",
+            color=discord.Color.red()
+        )
+    await interaction.response.send_message(embed=embed)
+
+
+# ── /profile ──────────────────────────────────────────────────────────────────
+
+@bot.tree.command(name="profile", description="View your full economy profile 📊")
+@app_commands.describe(user="User to view (leave blank for yourself)")
+async def slash_profile(interaction: discord.Interaction, user: discord.Member | None = None):
+    target = user or interaction.user
+    p = eco_get(target.id)
+    data = eco_load()
+    all_users = [(uid, d.get("coins", 0)) for uid, d in data.items() if not uid.startswith("__")]
+    all_users.sort(key=lambda x: x[1], reverse=True)
+    rank = next((i + 1 for i, (uid, _) in enumerate(all_users) if uid == str(target.id)), "?")
+    badges = " ".join(p.get("badges", [])) or "None"
+    embed = discord.Embed(title=f"📊 {target.display_name}'s Profile", color=discord.Color.blurple())
+    embed.set_thumbnail(url=target.display_avatar.url)
+    embed.add_field(name="🪙 Balance", value=f"**{p['coins']} coins**", inline=True)
+    embed.add_field(name="🏆 Rank", value=f"**#{rank}**", inline=True)
+    embed.add_field(name="🏅 Badges", value=badges, inline=True)
+    embed.add_field(name="📈 Total Earned", value=f"{p.get('total_earned', 0)} coins", inline=True)
+    embed.add_field(name="📉 Total Lost", value=f"{p.get('total_lost', 0)} coins", inline=True)
+    await interaction.response.send_message(embed=embed)
+
+
+# ── Prefix commands (b <command>) ─────────────────────────────────────────────
+
+def _fmt_cooldown(remaining: float) -> str:
+    h, rem = divmod(int(remaining), 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h {m}m"
+    if m:
+        return f"{m}m {s}s"
+    return f"{s}s"
+
+@bot.command(name="daily", aliases=["d"])
+async def cmd_daily(ctx: commands.Context):
+    uid = ctx.author.id
+    data = eco_load()
+    key = str(uid)
+    now = time.time()
+    s = eco_settings()
+    user_data = data.get(key, dict(_ECO_USER_DEFAULT))
+    elapsed = now - user_data.get("last_daily", 0)
+    if elapsed < 86400:
+        return await ctx.send(f"⏳ Already claimed! Come back in **{_fmt_cooldown(86400 - elapsed)}**.")
+    bonus = random.randint(s["daily_min"], s["daily_max"])
+    user_data["coins"] = user_data.get("coins", 0) + bonus
+    user_data["last_daily"] = now
+    user_data.setdefault("badges", [])
+    data[key] = user_data
+    eco_save(data)
+    await ctx.send(f"💰 **Daily claimed!** +**{bonus} coins** → **{user_data['coins']} coins** 🪙")
+
+@bot.command(name="gamble", aliases=["g", "bet", "slots"])
+async def cmd_gamble(ctx: commands.Context, amount: int = 0):
+    if amount <= 0:
+        return await ctx.send("❌ Usage: `b g <amount>`")
+    profile = eco_get(ctx.author.id)
+    if amount > profile["coins"]:
+        return await ctx.send(f"❌ You only have **{profile['coins']} coins**!")
+    slots = [random.choice(SLOT_EMOJIS) for _ in range(3)]
+    slot_display = " | ".join(slots)
+    if slots[0] == slots[1] == slots[2]:
+        if slots[0] == "💎":
+            mult, result = 10, "JACKPOT!! 💎💎💎"
+        elif slots[0] == "7️⃣":
+            mult, result = 5, "BIG WIN! 7️⃣7️⃣7️⃣"
+        else:
+            mult, result = 3, "Winner! 🎉"
+        winnings = amount * mult
+        new_bal = eco_add(ctx.author.id, winnings - amount)
+        await ctx.send(f"🎰 [ {slot_display} ]\n**{result}** You won **+{winnings} coins**! (×{mult}) → **{new_bal} coins**")
+    elif slots[0] == slots[1] or slots[1] == slots[2] or slots[0] == slots[2]:
+        await ctx.send(f"🎰 [ {slot_display} ]\nAlmost! You **break even**. → **{profile['coins']} coins**")
+    else:
+        new_bal = eco_add(ctx.author.id, -amount)
+        await ctx.send(f"🎰 [ {slot_display} ]\nYou lost **{amount} coins** 😢 → **{new_bal} coins**")
+
+@bot.command(name="balance", aliases=["bal", "wallet", "b"])
+async def cmd_balance(ctx: commands.Context, user: discord.Member | None = None):
+    target = user or ctx.author
+    p = eco_get(target.id)
+    badges = " ".join(p.get("badges", [])) or "—"
+    await ctx.send(f"💼 **{target.display_name}** | 🪙 **{p['coins']} coins** | Badges: {badges}")
+
+@bot.command(name="leaderboard", aliases=["lb", "top", "rich"])
+async def cmd_leaderboard(ctx: commands.Context):
+    data = eco_load()
+    if not data:
+        return await ctx.send("No economy data yet! Use `b daily` to start.")
+    sorted_users = sorted(
+        [(uid, d) for uid, d in data.items() if not uid.startswith("__")],
+        key=lambda x: x[1].get("coins", 0), reverse=True
+    )[:10]
+    medals = ["🥇", "🥈", "🥉"] + ["🏅"] * 7
+    lines = []
+    for i, (uid, udata) in enumerate(sorted_users):
+        member = ctx.guild.get_member(int(uid))
+        name = member.display_name if member else f"User#{uid[-4:]}"
+        lines.append(f"{medals[i]} **{name}** — {udata.get('coins', 0)} 🪙")
+    await ctx.send("🏆 **Coin Leaderboard**\n" + "\n".join(lines))
+
+@bot.command(name="give", aliases=["pay", "transfer"])
+async def cmd_give(ctx: commands.Context, user: discord.Member | None = None, amount: int = 0):
+    if not user or amount <= 0:
+        return await ctx.send("❌ Usage: `b give @user <amount>`")
+    if user.id == ctx.author.id:
+        return await ctx.send("❌ You can't give coins to yourself!")
+    profile = eco_get(ctx.author.id)
+    if profile["coins"] < amount:
+        return await ctx.send(f"❌ You only have **{profile['coins']} coins**!")
+    eco_add(ctx.author.id, -amount)
+    eco_add(user.id, amount)
+    await ctx.send(f"🎁 **{ctx.author.display_name}** gave **{amount} coins** to {user.mention}!")
+
+@bot.command(name="work", aliases=["w"])
+async def cmd_work(ctx: commands.Context):
+    s = eco_settings()
+    profile = eco_get(ctx.author.id)
+    now = time.time()
+    elapsed = now - profile.get("last_work", 0)
+    cooldown = s["work_cooldown"]
+    if elapsed < cooldown:
+        return await ctx.send(f"⏳ Rest for **{_fmt_cooldown(cooldown - elapsed)}** before working again.")
+    earned = random.randint(s["work_min"], s["work_max"])
+    job = random.choice(WORK_JOBS)
+    new_bal = eco_add(ctx.author.id, earned)
+    eco_update(ctx.author.id, last_work=now)
+    await ctx.send(f"💼 You {job} and earned **+{earned} coins**! Balance: **{new_bal} coins** 🪙")
+
+@bot.command(name="rob", aliases=["steal"])
+async def cmd_rob(ctx: commands.Context, user: discord.Member | None = None):
+    if not user:
+        return await ctx.send("❌ Usage: `b rob @user`")
+    if user.id == ctx.author.id:
+        return await ctx.send("❌ You can't rob yourself!")
+    s = eco_settings()
+    robber = eco_get(ctx.author.id)
+    victim = eco_get(user.id)
+    now = time.time()
+    elapsed = now - robber.get("last_rob", 0)
+    if elapsed < 3600:
+        return await ctx.send(f"⏳ Lay low for **{_fmt_cooldown(3600 - elapsed)}** first.")
+    if victim["coins"] < 50:
+        return await ctx.send(f"❌ {user.display_name} is broke! Not worth it.")
+    eco_update(ctx.author.id, last_rob=now)
+    if random.randint(1, 100) <= s["rob_chance"]:
+        steal = random.randint(10, min(200, victim["coins"] // 2 or 10))
+        eco_add(user.id, -steal)
+        eco_add(ctx.author.id, steal)
+        await ctx.send(f"🦹 **Heist success!** You stole **{steal} coins** from {user.mention}!")
+    else:
+        fine = int(robber["coins"] * s["rob_fine"] / 100)
+        eco_add(ctx.author.id, -fine)
+        await ctx.send(f"👮 **Caught!** You paid **{fine} coins** as a fine. 😬")
+
+@bot.command(name="coinflip", aliases=["cf", "flip"])
+async def cmd_coinflip(ctx: commands.Context, choice: str = "", amount: int = 0):
+    if choice.lower() not in ("heads", "tails", "h", "t") or amount <= 0:
+        return await ctx.send("❌ Usage: `b cf heads 100` or `b cf tails 50`")
+    choice_norm = "heads" if choice.lower() in ("heads", "h") else "tails"
+    profile = eco_get(ctx.author.id)
+    if profile["coins"] < amount:
+        return await ctx.send(f"❌ You only have **{profile['coins']} coins**!")
+    result = random.choice(["heads", "tails"])
+    if result == choice_norm:
+        new_bal = eco_add(ctx.author.id, amount)
+        await ctx.send(f"🪙 **{result.upper()}!** You guessed right and won **+{amount} coins**! → **{new_bal} coins**")
+    else:
+        new_bal = eco_add(ctx.author.id, -amount)
+        await ctx.send(f"🪙 **{result.upper()}!** Wrong guess — lost **{amount} coins** 😢 → **{new_bal} coins**")
+
+@bot.command(name="profile", aliases=["p", "stats"])
+async def cmd_profile(ctx: commands.Context, user: discord.Member | None = None):
+    target = user or ctx.author
+    p = eco_get(target.id)
+    data = eco_load()
+    sorted_users = sorted(
+        [(uid, d.get("coins", 0)) for uid, d in data.items() if not uid.startswith("__")],
+        key=lambda x: x[1], reverse=True
+    )
+    rank = next((i + 1 for i, (uid, _) in enumerate(sorted_users) if uid == str(target.id)), "?")
+    badges = " ".join(p.get("badges", [])) or "—"
+    await ctx.send(
+        f"📊 **{target.display_name}** | 🪙 **{p['coins']} coins** | 🏆 Rank **#{rank}** | "
+        f"📈 Earned: {p.get('total_earned', 0)} | 📉 Lost: {p.get('total_lost', 0)} | Badges: {badges}"
+    )
+
+@bot.command(name="shop", aliases=["store"])
+async def cmd_shop(ctx: commands.Context, *, item: str | None = None):
+    if item is None:
+        lines = [f"{emoji} **{name}** — {cost} 🪙 | {desc}" for name, (cost, emoji, desc) in SHOP_ITEMS.items()]
+        return await ctx.send("🛒 **Shop** — use `b shop <item>` to buy\n" + "\n".join(lines))
+    match = next((k for k in SHOP_ITEMS if k.lower() == item.lower()), None)
+    if not match:
+        return await ctx.send(f"❌ Item not found. Available: {', '.join(SHOP_ITEMS.keys())}")
+    cost, emoji, _ = SHOP_ITEMS[match]
+    profile = eco_get(ctx.author.id)
+    if profile["coins"] < cost:
+        return await ctx.send(f"❌ Need **{cost} coins**. You have **{profile['coins']}**. Keep grinding!")
+    role = discord.utils.get(ctx.guild.roles, name=match)
+    if role is None:
+        colors_map = {"VIP": 0xFFD700, "Diamond": 0x00BFFF, "King": 0x9B59B6, "Legend": 0xFF4500}
+        try:
+            role = await ctx.guild.create_role(name=match, color=discord.Color(colors_map.get(match, 0xFFFFFF)))
+        except discord.Forbidden:
+            return await ctx.send("❌ Missing Manage Roles permission.")
+    try:
+        await ctx.author.add_roles(role)
+    except discord.Forbidden:
+        return await ctx.send("❌ Can't assign role — move my role higher in server settings.")
+    eco_add(ctx.author.id, -cost)
+    await ctx.send(f"✅ Bought **{emoji} {match}** for **{cost} coins**! You now have the {role.mention} role.")
+
+@bot.command(name="bhelp", aliases=["commands", "cmds"])
+async def cmd_help(ctx: commands.Context):
+    lines = [
+        "**🪙 Bird Bot Prefix Commands** (`b <command>`)\n",
+        "`b daily` / `b d` — Claim daily coins",
+        "`b g <amount>` — Gamble (slots)",
+        "`b cf <heads/tails> <amount>` — Coin flip",
+        "`b work` / `b w` — Work for coins",
+        "`b rob @user` — Rob someone 🦹",
+        "`b bal [@user]` — Check balance",
+        "`b give @user <amount>` — Give coins",
+        "`b profile [@user]` — Full stats",
+        "`b lb` — Leaderboard",
+        "`b shop [item]` — Browse/buy shop",
+        "\n*All commands also available as slash commands!*",
+    ]
+    await ctx.send("\n".join(lines))
+
+
 # ── /help ─────────────────────────────────────────────────────────────────────
 
 @bot.tree.command(name="help", description="See all available commands")
@@ -1419,32 +1984,25 @@ async def slash_help(interaction: discord.Interaction):
     embed.add_field(name="🎵 Music", value=(
         "`/lyrics <song> [artist]` — Find song lyrics via Genius"
     ), inline=False)
-    embed.add_field(name="💰 Economy", value=(
-        "`/daily` — Claim daily coins\n"
-        "`/balance [@user]` — Check wallet\n"
-        "`/gamble <amount>` — Spin the slots 🎰\n"
-        "`/leaderboard` — Richest users\n"
-        "`/shop [item]` — Buy roles with coins"
+    embed.add_field(name="💰 Economy (slash)", value=(
+        "`/daily` · `/work` · `/rob @user`\n"
+        "`/balance` · `/profile` · `/give @user`\n"
+        "`/gamble` · `/coinflip` · `/leaderboard` · `/shop`"
+    ), inline=False)
+    embed.add_field(name="💰 Economy (prefix `b`)", value=(
+        "`b daily` / `b d` — Claim daily\n"
+        "`b g <amt>` — Slots · `b cf <h/t> <amt>` — Coinflip\n"
+        "`b work` · `b rob @user` · `b give @user <amt>`\n"
+        "`b bal` · `b profile` · `b lb` · `b shop [item]`\n"
+        "`b bhelp` — Full prefix command list"
     ), inline=False)
     embed.add_field(name="📊 Tools", value=(
         "`/poll <question>` — Quick yes/no poll\n"
-        "`/remindme <time> <msg>` — Set a DM reminder\n"
-        "`/translate <text> [lang]` — Translate anything\n"
+        "`/remindme <time> <msg>` — DM reminder\n"
+        "`/translate <text> [lang]` — Translate\n"
         "`/summarize <text>` — AI summary"
     ), inline=False)
-    embed.add_field(name="🔒 Admin Only", value=(
-        "`/admin rage <1-10>` — Change bot energy level\n"
-        "`/admin status` — View bot stats\n"
-        "`/admin clearall` — Clear all chat history\n"
-        "`/admin setchannel` — Set auto-reply channel\n"
-        "`/admin say` — Make bot say something\n"
-        "`/admin announce` — Fancy announcement\n"
-        "`/admin poll` — Multi-option poll\n"
-        "`/admin purge` — Delete messages\n"
-        "`/admin mute/unmute` — Timeout users\n"
-        "`/admin giveaway` — Start a giveaway 🎉"
-    ), inline=False)
-    embed.set_footer(text="You can also @mention me or DM me to chat!")
+    embed.set_footer(text="Admin commands are hidden. You can also @mention me or DM me!")
     await interaction.response.send_message(embed=embed)
 
 
