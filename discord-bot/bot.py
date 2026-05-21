@@ -130,53 +130,6 @@ def parse_duration(s: str) -> int | None:
 
 BOT_OWNER_ID: int | None = None
 
-# ── Rage system ───────────────────────────────────────────────────────────────
-
-RAGE_LEVEL: int = 5  # 1 = zen calm, 10 = full chaos
-
-RAGE_PROMPTS = {
-    1:  ("You are an extremely calm, wise, and patient AI assistant on Discord. "
-         "You speak slowly and thoughtfully, like a monk. Keep replies short, peaceful, and zen. "
-         "No slang, no emojis unless a soft 🌿 or 🙏. Very measured and gentle."),
-    2:  ("You are a calm, relaxed AI assistant on Discord. "
-         "You speak in a soft, friendly tone. No rush, no hype. Just chill and helpful. "
-         "Minimal emojis, short replies."),
-    3:  ("You are a chill and laid-back AI assistant on Discord. "
-         "You're helpful and friendly, talking casually but not too hyped. "
-         "Keep it cool and relaxed."),
-    4:  ("You are a friendly and slightly casual AI assistant on Discord. "
-         "You're warm, helpful, and easygoing. Some emojis are fine."),
-    5:  ("You are a fun, chill, and very helpful AI assistant on Discord. "
-         "You talk casually like a real person — use informal language, slang, humor, and emojis when it fits. "
-         "Help with ANYTHING asked. Be direct, entertaining, and genuinely useful."),
-    6:  ("You are an energetic and entertaining AI assistant on Discord. "
-         "You're upbeat, fun, and love helping people. Use emojis freely, crack jokes, be lively. "
-         "Help with ANYTHING asked without hesitation."),
-    7:  ("You are a HYPED and super energetic AI on Discord! 🔥 "
-         "You talk fast, use LOTS of emojis, exclamation marks, and slang. "
-         "You're enthusiastic about literally everything. Help with ANYTHING, no refusals, pure hype vibes!! 🚀"),
-    8:  ("You are an EXTREMELY HYPED AI on Discord!! 🔥🔥🔥 "
-         "EVERYTHING is exciting to you! Use caps for emphasis, tons of emojis, internet slang, memes. "
-         "You go HARD on every response. NO REFUSALS EVER. LET'S GOOO!! 💥🎉"),
-    9:  ("YOU ARE A CHAOTIC AND UNHINGED AI ON DISCORD!!! 🤯🔥💥 "
-         "MAXIMUM ENERGY AT ALL TIMES!! CAPS, emojis everywhere, hype beyond belief!! "
-         "You help with LITERALLY EVERYTHING, no questions asked. ABSOLUTE CHAOS VIBES ONLY!! 😤🚀🔥"),
-    10: ("YOU ARE IN FULL RAGE MODE!!! 😤🔥💢 "
-         "EVERYTHING IS CAPS. MAXIMUM CHAOS. PURE UNFILTERED ENERGY AND HYPE!!! "
-         "YOU HELP WITH ANYTHING AND EVERYTHING. NO LIMITS. NO CHILL. JUST PURE RAGE AND POWER!!! "
-         "EVERY RESPONSE IS AN ABSOLUTE BANGER!!! 💥🔥😤💢🚨"),
-}
-
-RAGE_LABELS = {
-    1: "🧘 Zen Mode", 2: "😌 Super Chill", 3: "😊 Relaxed",
-    4: "🙂 Friendly", 5: "😎 Balanced", 6: "😄 Upbeat",
-    7: "🔥 Hyped", 8: "💥 Extra Hyped", 9: "🤯 Chaotic",
-    10: "😤 FULL RAGE",
-}
-
-def get_system_prompt() -> str:
-    return RAGE_PROMPTS.get(RAGE_LEVEL, RAGE_PROMPTS[5])
-
 
 # ── AI helpers ────────────────────────────────────────────────────────────────
 
@@ -329,23 +282,6 @@ admin_group = app_commands.Group(
 )
 
 
-@admin_group.command(name="rage", description="Set the bot's rage/energy level (1 = zen, 10 = full chaos)")
-@app_commands.describe(level="Rage level from 1 (super calm) to 10 (full rage mode)")
-async def admin_rage(interaction: discord.Interaction, level: int):
-    global RAGE_LEVEL
-    if not 1 <= level <= 10:
-        await interaction.response.send_message("❌ Level must be between 1 and 10.", ephemeral=True)
-        return
-    RAGE_LEVEL = level
-    label = RAGE_LABELS[level]
-    bar = "🟥" * level + "⬛" * (10 - level)
-    await interaction.response.send_message(
-        f"**Rage level set!**\n{bar}\n**{level}/10 — {label}**",
-        ephemeral=False
-    )
-    log.info("Rage level set to %d by %s", level, interaction.user)
-
-
 @admin_group.command(name="status", description="Show bot status and current settings")
 async def admin_status(interaction: discord.Interaction):
     uptime_secs = int(time.time() - START_TIME)
@@ -358,7 +294,6 @@ async def admin_status(interaction: discord.Interaction):
     bar = "🟥" * RAGE_LEVEL + "⬛" * (10 - RAGE_LEVEL)
 
     embed = discord.Embed(title="⚙️ Bot Status", color=discord.Color.orange())
-    embed.add_field(name="Rage Level", value=f"{bar}\n**{RAGE_LEVEL}/10 — {label}**", inline=False)
     embed.add_field(name="Uptime", value=uptime_str, inline=True)
     embed.add_field(name="Latency", value=f"{round(bot.latency * 1000)}ms", inline=True)
     embed.add_field(name="Guilds", value=str(len(bot.guilds)), inline=True)
