@@ -186,31 +186,6 @@ def trim_history(channel_id: int) -> None:
         conversation_history[channel_id] = history[-(MAX_HISTORY * 2):]
 
 
-def ask_ai(channel_id: int, user_message: str) -> str:
-    history = conversation_history[channel_id]
-    history.append({"role": "user", "content": user_message})
-    trim_history(channel_id)
-
-    messages = [{"role": "system", "content": get_system_prompt()}] + history
-
-    response = client_ai.chat.completions.create(
-        model=MODEL,
-        messages=messages,
-        extra_body={"reasoning": {"enabled": True}},
-    )
-
-    assistant_msg = response.choices[0].message
-    reply_text = assistant_msg.content or ""
-
-    history.append({
-        "role": "assistant",
-        "content": assistant_msg.content,
-        "reasoning_details": assistant_msg.reasoning_details,
-    })
-
-    return reply_text
-
-
 def ask_ai_once(prompt: str, retries: int = 3) -> str:
     for attempt in range(retries):
         try:
