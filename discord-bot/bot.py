@@ -2132,11 +2132,8 @@ async def slash_guess(interaction: discord.Interaction, character: str):
     secret = state["character"]
     topic = state["topic"]
 
-    # So sánh tên (bỏ qua hoa thường, khoảng trắng thừa)
-if character.strip().lower() == secret.lower():
+    if character.strip().lower() == secret.lower():
         game_sessions[ch]["active"] = False
-
-        # Thưởng coin dựa trên số câu hỏi đã dùng
         questions_used = state["questions"]
         if questions_used <= 5:
             reward = 200
@@ -2146,9 +2143,7 @@ if character.strip().lower() == secret.lower():
             reward = 50
         else:
             reward = 20
-
         new_bal = eco_add(interaction.user.id, reward)
-
         embed = discord.Embed(
             title="🎉 CHÍNH XÁC!!!",
             description=(
@@ -2169,7 +2164,6 @@ if character.strip().lower() == secret.lower():
         )
         embed.set_footer(text=f"Đã đoán sai | Câu hỏi đã dùng: {state['questions']}")
         await interaction.response.send_message(embed=embed)
-
 
 @bot.tree.command(name="giveup", description="Bỏ cuộc và xem đáp án 🏳️")
 async def slash_giveup(interaction: discord.Interaction):
