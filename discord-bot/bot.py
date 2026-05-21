@@ -25,7 +25,7 @@ log = logging.getLogger(__name__)
 
 OPENROUTER_API_KEY = os.environ["OPENROUTER_API_KEY"]
 DISCORD_BOT_TOKEN = os.environ["DISCORD_BOT_TOKEN"]
-MODEL = "openai/gpt-oss-120b:free"
+MODEL = "google/gemma-4-31b-it:free"
 MAX_HISTORY = 10
 
 client_ai = OpenAI(
