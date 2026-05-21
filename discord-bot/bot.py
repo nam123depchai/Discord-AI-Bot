@@ -211,16 +211,53 @@ def ask_ai(channel_id: int, user_message: str) -> str:
     return reply_text
 
 
-def ask_ai_once(prompt: str) -> str:
-    response = client_ai.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": get_system_prompt()},
-            {"role": "user", "content": prompt},
-        ],
-        extra_body={"reasoning": {"enabled": True}},
-    )
-    return response.choices[0].message.content or ""
+def ask_ai_once(prompt: str, retries: int = 3) -> str:
+    for attempt in range(retries):
+        try:
+            response = client_ai.chat.completions.create(
+                model=MODEL,
+                messages=[
+                    {"role": "system", "content": get_system_prompt()},
+                    {"role": "user", "content": prompt},
+                ],
+                extra_body={"reasoning": {"enabled": True}},
+                timeout=30,
+            )
+            return response.choices[0].message.content or ""
+        except Exception as exc:
+            log.warning("ask_ai_once attempt %d failed: %s", attempt + 1, exc)
+            if attempt < retries - 1:
+                time.sleep(2)
+    return ""
+
+
+def ask_ai(channel_id: int, user_message: str, retries: int = 3) -> str:
+    history = conversation_history[channel_id]
+    history.append({"role": "user", "content": user_message})
+    trim_history(channel_id)
+    messages = [{"role": "system", "content": get_system_prompt()}] + history
+
+    for attempt in range(retries):
+        try:
+            response = client_ai.chat.completions.create(
+                model=MODEL,
+                messages=messages,
+                extra_body={"reasoning": {"enabled": True}},
+                timeout=30,
+            )
+            assistant_msg = response.choices[0].message
+            reply_text = assistant_msg.content or ""
+            history.append({
+                "role": "assistant",
+                "content": assistant_msg.content,
+                "reasoning_details": assistant_msg.reasoning_details,
+            })
+            return reply_text
+        except Exception as exc:
+            log.warning("ask_ai attempt %d failed: %s", attempt + 1, exc)
+            if attempt < retries - 1:
+                time.sleep(2)
+    return ""
 
 
 async def send_long(interaction: discord.Interaction, text: str) -> None:
