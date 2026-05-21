@@ -2002,9 +2002,177 @@ async def slash_help(interaction: discord.Interaction):
         "`/translate <text> [lang]` — Translate\n"
         "`/summarize <text>` — AI summary"
     ), inline=False)
+    embed.add_field(name="🎮 Đoán nhân vật", value=(
+        "`/topic` — Chọn chủ đề & bắt đầu game\n"
+        "`/ask <câu hỏi>` — Hỏi YES/NO về nhân vật\n"
+        "`/guess <tên>` — Đoán nhân vật\n"
+        "`/giveup` — Xem đáp án & bỏ cuộc"
+    ), inline=False)
     embed.set_footer(text="Admin commands are hidden. You can also @mention me or DM me!")
     await interaction.response.send_message(embed=embed)
 
 
+# ── Guessing Game ─────────────────────────────────────────────────────────────
+
+GAME_TOPICS: dict[str, list[str]] = {
+    "One Piece":       ["Luffy", "Zoro", "Nami", "Sanji", "Chopper", "Robin", "Franky", "Brook", "Shanks", "Blackbeard", "Ace", "Law", "Hancock", "Whitebeard", "Kaido"],
+    "Naruto":          ["Naruto", "Sasuke", "Sakura", "Kakashi", "Itachi", "Gaara", "Hinata", "Jiraiya", "Tsunade", "Orochimaru", "Minato", "Obito", "Pain"],
+    "Dragon Ball":     ["Goku", "Vegeta", "Gohan", "Piccolo", "Frieza", "Cell", "Beerus", "Broly", "Krillin", "Trunks", "Bulma", "Android 18"],
+    "Demon Slayer":    ["Tanjiro", "Nezuko", "Zenitsu", "Inosuke", "Rengoku", "Muzan", "Shinobu", "Gyomei", "Sanemi", "Doma"],
+    "Attack on Titan": ["Eren", "Mikasa", "Armin", "Levi", "Historia", "Zeke", "Reiner", "Annie", "Hange", "Erwin"],
+}
+
+# channel_id -> { topic, character, questions, active }
+game_sessions: dict[int, dict] = {}
+
+
+class TopicSelectView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=60)
+        for topic in GAME_TOPICS:
+            self.add_item(TopicButton(topic))
+
+
+class TopicButton(discord.ui.Button):
+    def __init__(self, topic: str):
+        super().__init__(label=topic, style=discord.ButtonStyle.primary, emoji="🎮")
+        self.topic = topic
+
+    async def callback(self, interaction: discord.Interaction):
+        ch = interaction.channel_id
+        character = random.choice(GAME_TOPICS[self.topic])
+        game_sessions[ch] = {
+            "topic": self.topic,
+            "character": character,
+            "questions": 0,
+            "active": True,
+        }
+        embed = discord.Embed(
+            title=f"🎮 Game bắt đầu! Chủ đề: {self.topic}",
+            description=(
+                "🤫 Tôi đã chọn một nhân vật bí mật!\n\n"
+                "**Cách chơi:**\n"
+                "`/ask <câu hỏi>` — Tôi trả lời YES/NO hoặc ngắn gọn\n"
+                "`/guess <tên>` — Đoán tên nhân vật\n\n"
+                "*Ví dụ hỏi: Nhân vật này có ăn trái ác quỷ không?*"
+            ),
+            color=discord.Color.purple()
+        )
+        embed.set_footer(text="Hỏi thật nhiều trước khi đoán nhé!")
+        await interaction.response.edit_message(content=None, embed=embed, view=None)
+
+
+@bot.tree.command(name="topic", description="Bắt đầu game đoán nhân vật anime! 🎮")
+async def slash_topic(interaction: discord.Interaction):
+    # End existing session if any
+    if interaction.channel_id in game_sessions:
+        game_sessions.pop(interaction.channel_id)
+    embed = discord.Embed(
+        title="🎮 Game Đoán Nhân Vật Anime",
+        description="Chọn chủ đề bên dưới để bắt đầu!\nBot sẽ nghĩ đến một nhân vật, bạn hỏi và đoán.",
+        color=discord.Color.blurple()
+    )
+    await interaction.response.send_message(embed=embed, view=TopicSelectView())
+
+
+@bot.tree.command(name="ask", description="Hỏi về nhân vật bí mật (YES/NO hoặc gợi ý ngắn)")
+@app_commands.describe(question="Câu hỏi của bạn về nhân vật")
+async def slash_ask(interaction: discord.Interaction, question: str):
+    ch = interaction.channel_id
+    state = game_sessions.get(ch)
+    if not state or not state.get("active"):
+        await interaction.response.send_message(
+            "❌ Chưa có game nào đang chạy! Dùng `/topic` để bắt đầu.", ephemeral=True
+        )
+        return
+
+    state["questions"] += 1
+    character = state["character"]
+    topic = state["topic"]
+
+    await interaction.response.defer(thinking=True)
+
+    prompt = (
+        f"Bạn đang chơi game đoán nhân vật. Nhân vật bí mật là '{character}' từ '{topic}'.\n"
+        f"Người chơi hỏi: '{question}'\n\n"
+        f"Quy tắc trả lời:\n"
+        f"- Câu hỏi có/không → chỉ trả lời 'Có' hoặc 'Không'\n"
+        f"- Câu hỏi về đặc điểm (tóc, mắt, vai trò...) → trả lời 1-4 từ (VD: 'Đen', 'Thuyền trưởng', 'Rất mạnh')\n"
+        f"- TUYỆT ĐỐI không tiết lộ tên nhân vật\n"
+        f"- Trả lời chính xác theo thông tin thật của nhân vật\n"
+        f"- Chỉ trả lời ngắn gọn, không giải thích"
+    )
+
+    try:
+        reply = await asyncio.get_event_loop().run_in_executor(None, ask_ai_once, prompt)
+    except Exception:
+        await interaction.followup.send("❌ Lỗi AI! Thử lại nhé.")
+        return
+
+    reply = reply.strip().split("\n")[0]  # chỉ lấy dòng đầu
+
+    embed = discord.Embed(color=discord.Color.blue())
+    embed.add_field(name=f"❓ Câu #{state['questions']}", value=f"*{question}*", inline=False)
+    embed.add_field(name="💬 Trả lời", value=f"**{reply}**", inline=False)
+    embed.set_footer(text=f"Topic: {topic} | Dùng /guess <tên> nếu đã biết!")
+    await interaction.followup.send(embed=embed)
+
+
+@bot.tree.command(name="guess", description="Đoán tên nhân vật bí mật! 🕵️")
+@app_commands.describe(character="Tên nhân vật bạn đoán")
+async def slash_guess(interaction: discord.Interaction, character: str):
+    ch = interaction.channel_id
+    state = game_sessions.get(ch)
+    if not state or not state.get("active"):
+        await interaction.response.send_message(
+            "❌ Chưa có game nào đang chạy! Dùng `/topic` để bắt đầu.", ephemeral=True
+        )
+        return
+
+    secret = state["character"]
+    topic = state["topic"]
+
+    # So sánh tên (bỏ qua hoa thường, khoảng trắng thừa)
+    if character.strip().lower() == secret.lower():
+        game_sessions[ch]["active"] = False
+        embed = discord.Embed(
+            title="🎉 CHÍNH XÁC!!!",
+            description=(
+                f"{interaction.user.mention} đã đoán đúng!\n\n"
+                f"Nhân vật bí mật là **{secret}** từ **{topic}**!\n"
+                f"Số câu hỏi đã dùng: **{state['questions']}** câu"
+            ),
+            color=discord.Color.green()
+        )
+        embed.set_footer(text="Dùng /topic để chơi ván mới!")
+        await interaction.response.send_message(embed=embed)
+    else:
+        embed = discord.Embed(
+            title="❌ Sai rồi!",
+            description=f"**{character}** không phải nhân vật bí mật.\nHỏi thêm rồi thử lại!",
+            color=discord.Color.red()
+        )
+        embed.set_footer(text=f"Đã đoán sai | Câu hỏi đã dùng: {state['questions']}")
+        await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="giveup", description="Bỏ cuộc và xem đáp án 🏳️")
+async def slash_giveup(interaction: discord.Interaction):
+    ch = interaction.channel_id
+    state = game_sessions.get(ch)
+    if not state or not state.get("active"):
+        await interaction.response.send_message("❌ Không có game nào đang chạy!", ephemeral=True)
+        return
+    secret = state["character"]
+    topic = state["topic"]
+    game_sessions.pop(ch)
+    embed = discord.Embed(
+        title="🏳️ Bỏ cuộc!",
+        description=f"Nhân vật bí mật là **{secret}** từ **{topic}**.\nDùng `/topic` để chơi lại!",
+        color=discord.Color.orange()
+    )
+    await interaction.response.send_message(embed=embed)
+
 if __name__ == "__main__":
+    
     bot.run(DISCORD_BOT_TOKEN, log_handler=None)
