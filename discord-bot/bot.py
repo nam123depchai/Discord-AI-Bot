@@ -2133,14 +2133,29 @@ async def slash_guess(interaction: discord.Interaction, character: str):
     topic = state["topic"]
 
     # So sánh tên (bỏ qua hoa thường, khoảng trắng thừa)
-    if character.strip().lower() == secret.lower():
+if character.strip().lower() == secret.lower():
         game_sessions[ch]["active"] = False
+
+        # Thưởng coin dựa trên số câu hỏi đã dùng
+        questions_used = state["questions"]
+        if questions_used <= 5:
+            reward = 200
+        elif questions_used <= 10:
+            reward = 100
+        elif questions_used <= 20:
+            reward = 50
+        else:
+            reward = 20
+
+        new_bal = eco_add(interaction.user.id, reward)
+
         embed = discord.Embed(
             title="🎉 CHÍNH XÁC!!!",
             description=(
                 f"{interaction.user.mention} đã đoán đúng!\n\n"
                 f"Nhân vật bí mật là **{secret}** từ **{topic}**!\n"
-                f"Số câu hỏi đã dùng: **{state['questions']}** câu"
+                f"Số câu hỏi đã dùng: **{questions_used}** câu\n\n"
+                f"💰 Phần thưởng: **+{reward} coins** → **{new_bal} coins**"
             ),
             color=discord.Color.green()
         )
