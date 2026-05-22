@@ -158,6 +158,26 @@ def ask_ai_once(prompt: str, retries: int = 3) -> str:
                 time.sleep(2)
     return ""
 
+def ask_ai_simple(prompt: str) -> str:
+    """Gọi AI không có reasoning — dùng cho câu trả lời ngắn."""
+    for attempt in range(3):
+        try:
+            response = client_ai.chat.completions.create(
+                model=MODEL,
+                messages=[
+                    {"role": "system", "content": "Bạn là trợ lý trả lời cực ngắn gọn."},
+                    {"role": "user", "content": prompt},
+                ],
+                timeout=30,
+                max_tokens=20,
+            )
+            return response.choices[0].message.content or ""
+        except Exception as exc:
+            log.warning("ask_ai_simple attempt %d failed: %s", attempt + 1, exc)
+            if attempt < 2:
+                time.sleep(2)
+    return ""
+
 
 def ask_ai(channel_id: int, user_message: str, retries: int = 3) -> str:
     history = conversation_history[channel_id]
@@ -2051,7 +2071,7 @@ async def slash_ask(interaction: discord.Interaction, question: str):
     )
 
     try:
-        reply = await asyncio.get_event_loop().run_in_executor(None, ask_ai_once, prompt)
+        reply = await asyncio.get_event_loop().run_in_executor(None, ask_ai_simple, prompt)
         lines = [l.strip() for l in reply.strip().split("\n") if l.strip()]
         reply = lines[0] if lines else "Không rõ"
         reply = reply.strip("*").strip()
