@@ -2050,13 +2050,21 @@ async def slash_ask(interaction: discord.Interaction, question: str):
         f"- Chỉ trả lời ngắn gọn, không giải thích"
     )
 
-    try:
+try:
         reply = await asyncio.get_event_loop().run_in_executor(None, ask_ai_once, prompt)
     except Exception:
         await interaction.followup.send("❌ Lỗi AI! Thử lại nhé.")
         return
 
-    reply = reply.strip().split("\n")[0]  # chỉ lấy dòng đầu
+    # Lấy dòng đầu tiên không rỗng
+    lines = [l.strip() for l in reply.strip().split("\n") if l.strip()]
+    reply = lines[0] if lines else "Không rõ"
+
+    # Bỏ ** nếu AI tự thêm vào
+    reply = reply.strip("*").strip()
+
+    if not reply:
+        reply = "Không rõ"
 
     embed = discord.Embed(color=discord.Color.blue())
     embed.add_field(name=f"❓ Câu #{state['questions']}", value=f"*{question}*", inline=False)
