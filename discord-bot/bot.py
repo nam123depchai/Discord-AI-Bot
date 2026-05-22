@@ -1981,6 +1981,35 @@ async def slash_help(interaction: discord.Interaction):
 
 # ── Guessing Game ─────────────────────────────────────────────────────────────
 
+GAME_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "game_sessions.json")
+
+def game_load() -> dict:
+    if os.path.exists(GAME_FILE):
+        try:
+            with open(GAME_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def game_save(data: dict) -> None:
+    with open(GAME_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+def game_get(channel_id: int) -> dict | None:
+    return game_load().get(str(channel_id))
+
+def game_set(channel_id: int, session: dict) -> None:
+    data = game_load()
+    data[str(channel_id)] = session
+    game_save(data)
+
+def game_delete(channel_id: int) -> None:
+    data = game_load()
+    data.pop(str(channel_id), None)
+    game_save(data)
+
+
 GAME_TOPICS: dict[str, list[str]] = {
     "One Piece":       ["Luffy", "Zoro", "Nami", "Sanji", "Chopper", "Robin", "Franky", "Brook", "Shanks", "Blackbeard", "Ace", "Law", "Hancock", "Whitebeard", "Kaido"],
     "Naruto":          ["Naruto", "Sasuke", "Sakura", "Kakashi", "Itachi", "Gaara", "Hinata", "Jiraiya", "Tsunade", "Orochimaru", "Minato", "Obito", "Pain"],
@@ -1988,9 +2017,6 @@ GAME_TOPICS: dict[str, list[str]] = {
     "Demon Slayer":    ["Tanjiro", "Nezuko", "Zenitsu", "Inosuke", "Rengoku", "Muzan", "Shinobu", "Gyomei", "Sanemi", "Doma"],
     "Attack on Titan": ["Eren", "Mikasa", "Armin", "Levi", "Historia", "Zeke", "Reiner", "Annie", "Hange", "Erwin"],
 }
-
-# channel_id -> { topic, character, questions, active }
-game_sessions: dict[int, dict] = {}
 
 
 class TopicSelectView(discord.ui.View):
@@ -2008,12 +2034,12 @@ class TopicButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         ch = interaction.channel_id
         character = random.choice(GAME_TOPICS[self.topic])
-        game_sessions[ch] = {
+        game_set(ch, {
             "topic": self.topic,
             "character": character,
             "questions": 0,
             "active": True,
-        }
+        })
         embed = discord.Embed(
             title=f"🎮 Game bắt đầu! Chủ đề: {self.topic}",
             description=(
@@ -2031,9 +2057,7 @@ class TopicButton(discord.ui.Button):
 
 @bot.tree.command(name="topic", description="Bắt đầu game đoán nhân vật anime! 🎮")
 async def slash_topic(interaction: discord.Interaction):
-    # End existing session if any
-    if interaction.channel_id in game_sessions:
-        game_sessions.pop(interaction.channel_id)
+    game_delete(interaction.channel_id)
     embed = discord.Embed(
         title="🎮 Game Đoán Nhân Vật Anime",
         description="Chọn chủ đề bên dưới để bắt đầu!\nBot sẽ nghĩ đến một nhân vật, bạn hỏi và đoán.",
@@ -2046,7 +2070,7 @@ async def slash_topic(interaction: discord.Interaction):
 @app_commands.describe(question="Câu hỏi của bạn về nhân vật")
 async def slash_ask(interaction: discord.Interaction, question: str):
     ch = interaction.channel_id
-    state = game_sessions.get(ch)
+    state = game_get(ch)
     if not state or not state.get("active"):
         await interaction.response.send_message(
             "❌ Chưa có game nào đang chạy! Dùng `/topic` để bắt đầu.", ephemeral=True
@@ -2054,6 +2078,7 @@ async def slash_ask(interaction: discord.Interaction, question: str):
         return
 
     state["questions"] += 1
+    game_set(ch, state)
     character = state["character"]
     topic = state["topic"]
 
@@ -2087,11 +2112,12 @@ async def slash_ask(interaction: discord.Interaction, question: str):
     embed.set_footer(text=f"Topic: {topic} | Dùng /guess <tên> nếu đã biết!")
     await interaction.followup.send(embed=embed)
 
+
 @bot.tree.command(name="guess", description="Đoán tên nhân vật bí mật! 🕵️")
 @app_commands.describe(character="Tên nhân vật bạn đoán")
 async def slash_guess(interaction: discord.Interaction, character: str):
     ch = interaction.channel_id
-    state = game_sessions.get(ch)
+    state = game_get(ch)
     if not state or not state.get("active"):
         await interaction.response.send_message(
             "❌ Chưa có game nào đang chạy! Dùng `/topic` để bắt đầu.", ephemeral=True
@@ -2102,7 +2128,8 @@ async def slash_guess(interaction: discord.Interaction, character: str):
     topic = state["topic"]
 
     if character.strip().lower() == secret.lower():
-        game_sessions[ch]["active"] = False
+        state["active"] = False
+        game_set(ch, state)
         questions_used = state["questions"]
         if questions_used <= 5:
             reward = 200
@@ -2134,23 +2161,24 @@ async def slash_guess(interaction: discord.Interaction, character: str):
         embed.set_footer(text=f"Đã đoán sai | Câu hỏi đã dùng: {state['questions']}")
         await interaction.response.send_message(embed=embed)
 
+
 @bot.tree.command(name="giveup", description="Bỏ cuộc và xem đáp án 🏳️")
 async def slash_giveup(interaction: discord.Interaction):
     ch = interaction.channel_id
-    state = game_sessions.get(ch)
+    state = game_get(ch)
     if not state or not state.get("active"):
         await interaction.response.send_message("❌ Không có game nào đang chạy!", ephemeral=True)
         return
     secret = state["character"]
     topic = state["topic"]
-    game_sessions.pop(ch)
+    game_delete(ch)
     embed = discord.Embed(
         title="🏳️ Bỏ cuộc!",
         description=f"Nhân vật bí mật là **{secret}** từ **{topic}**.\nDùng `/topic` để chơi lại!",
         color=discord.Color.orange()
     )
     await interaction.response.send_message(embed=embed)
-
+    
 if __name__ == "__main__":
     
     bot.run(DISCORD_BOT_TOKEN, log_handler=None)
