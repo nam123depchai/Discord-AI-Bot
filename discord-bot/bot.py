@@ -253,46 +253,6 @@ async def on_ready():
              bot.user, bot.user.id, len(bot.guilds), BOT_OWNER_ID)
 
 
-@bot.event
-async def on_message(message: discord.Message):
-    if message.author.bot:
-        return
-    await bot.process_commands(message)
-
-    mentioned = bot.user in message.mentions
-    is_dm = isinstance(message.channel, discord.DMChannel)
-    is_auto_channel = message.channel.id == AUTO_REPLY_CHANNEL_ID
-
-    if not (mentioned or is_dm or is_auto_channel):
-        return
-
-    content = message.content
-    for m in message.mentions:
-        content = content.replace(f"<@{m.id}>", "").replace(f"<@!{m.id}>", "")
-    content = content.strip()
-
-    if not content:
-        if not is_auto_channel:
-            await message.reply("Hey! How can I help you? Try `/help` to see all commands.")
-        return
-
-    async with message.channel.typing():
-        try:
-            reply = await asyncio.get_event_loop().run_in_executor(
-                None, ask_ai, message.channel.id, content
-            )
-        except Exception as exc:
-            log.exception("AI error: %s", exc)
-            await message.reply("Something went wrong. Please try again.")
-            return
-
-    if not reply:
-        await message.reply("Got an empty response. Please try again.")
-        return
-
-    await reply_long(message, reply)
-
-
 # ── /admin (admin only) ───────────────────────────────────────────────────────
 
 admin_group = app_commands.Group(
@@ -1082,43 +1042,6 @@ async def slash_avatar(interaction: discord.Interaction, style: str = "anime"):
     except Exception as exc:
         log.exception("Avatar error: %s", exc)
         await interaction.followup.send("❌ Something went wrong. Please try again!")
-
-
-# ── /daily ────────────────────────────────────────────────────────────────────
-
-@bot.tree.command(name="daily", description="Claim your daily coins! 💰")
-async def slash_daily(interaction: discord.Interaction):
-    uid = interaction.user.id
-    data = eco_load()
-    key = str(uid)
-    now = time.time()
-    user_data = data.get(key, {"coins": 0, "last_daily": 0, "badges": []})
-    last = user_data.get("last_daily", 0)
-    cooldown = 86400  # 24 hours
-    elapsed = now - last
-    if elapsed < cooldown:
-        remaining = cooldown - elapsed
-        hours, rem = divmod(int(remaining), 3600)
-        minutes = rem // 60
-        await interaction.response.send_message(
-            f"⏳ You already claimed today! Come back in **{hours}h {minutes}m**.",
-            ephemeral=True
-        )
-        return
-    bonus = random.randint(80, 150)
-    user_data["coins"] = user_data.get("coins", 0) + bonus
-    user_data["last_daily"] = now
-    if key not in data:
-        user_data["badges"] = []
-    data[key] = user_data
-    eco_save(data)
-    embed = discord.Embed(
-        title="💰 Daily Coins Claimed!",
-        description=f"**+{bonus} coins** added to your wallet!\nYou now have **{user_data['coins']} coins** 🪙",
-        color=discord.Color.gold()
-    )
-    embed.set_footer(text="Come back in 24 hours for more!")
-    await interaction.response.send_message(embed=embed)
 
 
 # ── /balance ──────────────────────────────────────────────────────────────────
@@ -1975,6 +1898,17 @@ async def slash_help(interaction: discord.Interaction):
         "`/guess <tên>` — Đoán nhân vật\n"
         "`/giveup` — Xem đáp án & bỏ cuộc"
     ), inline=False)
+    embed.add_field(name="🎮 Games", value=(
+        "`/blackjack <amount>` — Đánh bài 21\n"
+        "`/rps @user <amount>` — Oẳn tù tì cược coin\n"
+        "`/quiz [reward]` — Quiz anime 30 giây\n"
+        "`/8ball` · `/roll` · `/trivia`"
+    ), inline=False)
+    embed.add_field(name="🎂 Birthday", value=(
+        "`/birthday set` — Lưu ngày sinh\n"
+        "`/birthday check` — Xem ngày sinh\n"
+        "`/birthday remove` — Xóa ngày sinh"
+    ), inline=False)
     embed.set_footer(text="Admin commands are hidden. You can also @mention me or DM me!")
     await interaction.response.send_message(embed=embed)
 
@@ -2179,6 +2113,507 @@ async def slash_giveup(interaction: discord.Interaction):
     )
     await interaction.response.send_message(embed=embed)
     
+    # ── /blackjack ────────────────────────────────────────────────────────────────
+
+CARD_SUITS = ["♠", "♥", "♦", "♣"]
+CARD_RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
+
+def bj_deck():
+    return [f"{r}{s}" for s in CARD_SUITS for r in CARD_RANKS]
+
+def bj_value(card: str) -> int:
+    r = card[:-1]
+    if r in ("J", "Q", "K"): return 10
+    if r == "A": return 11
+    return int(r)
+
+def bj_hand_value(hand: list[str]) -> int:
+    total = sum(bj_value(c) for c in hand)
+    aces = sum(1 for c in hand if c[:-1] == "A")
+    while total > 21 and aces:
+        total -= 10
+        aces -= 1
+    return total
+
+def bj_hand_str(hand: list[str]) -> str:
+    return " ".join(f"`{c}`" for c in hand)
+
+class BlackjackView(discord.ui.View):
+    def __init__(self, deck, player_hand, dealer_hand, bet, user_id):
+        super().__init__(timeout=60)
+        self.deck = deck
+        self.player_hand = player_hand
+        self.dealer_hand = dealer_hand
+        self.bet = bet
+        self.user_id = user_id
+
+    async def update(self, interaction: discord.Interaction, ended: bool = False):
+        pv = bj_hand_value(self.player_hand)
+        dv = bj_hand_value(self.dealer_hand)
+
+        if ended:
+            # Dealer draws until 17+
+            while bj_hand_value(self.dealer_hand) < 17:
+                self.dealer_hand.append(self.deck.pop())
+            dv = bj_hand_value(self.dealer_hand)
+            pv = bj_hand_value(self.player_hand)
+
+            if pv > 21:
+                result, color, delta = "💥 Bust! Bạn thua!", discord.Color.red(), -self.bet
+            elif dv > 21 or pv > dv:
+                result, color, delta = "🎉 Bạn thắng!", discord.Color.green(), self.bet
+            elif pv == dv:
+                result, color, delta = "🤝 Hòa!", discord.Color.orange(), 0
+            else:
+                result, color, delta = "😢 Dealer thắng!", discord.Color.red(), -self.bet
+
+            new_bal = eco_add(self.user_id, delta)
+            embed = discord.Embed(title=f"🃏 Blackjack — {result}", color=color)
+            embed.add_field(name=f"Bạn ({pv})", value=bj_hand_str(self.player_hand), inline=False)
+            embed.add_field(name=f"Dealer ({dv})", value=bj_hand_str(self.dealer_hand), inline=False)
+            coin_str = f"+{delta}" if delta > 0 else str(delta)
+            embed.set_footer(text=f"{coin_str} coins | Balance: {new_bal} coins")
+            for item in self.children:
+                item.disabled = True
+            await interaction.response.edit_message(embed=embed, view=self)
+            return
+
+        # Mid-game: hide dealer's second card
+        embed = discord.Embed(title="🃏 Blackjack", color=discord.Color.blurple())
+        embed.add_field(name=f"Bạn ({pv})", value=bj_hand_str(self.player_hand), inline=False)
+        embed.add_field(name="Dealer (?)", value=f"`{self.dealer_hand[0]}` `??`", inline=False)
+        embed.set_footer(text=f"Cược: {self.bet} coins | Hit hay Stand?")
+
+        if pv > 21:
+            await self.update(interaction, ended=True)
+            return
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Hit 🃏", style=discord.ButtonStyle.primary)
+    async def hit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Không phải lượt bạn!", ephemeral=True); return
+        self.player_hand.append(self.deck.pop())
+        await self.update(interaction, ended=bj_hand_value(self.player_hand) >= 21)
+
+    @discord.ui.button(label="Stand ✋", style=discord.ButtonStyle.danger)
+    async def stand(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Không phải lượt bạn!", ephemeral=True); return
+        await self.update(interaction, ended=True)
+
+
+@bot.tree.command(name="blackjack", description="Đánh bài 21 với coin cược! 🃏")
+@app_commands.describe(amount="Số coin cược")
+async def slash_blackjack(interaction: discord.Interaction, amount: int):
+    if amount <= 0:
+        await interaction.response.send_message("❌ Cược ít nhất 1 coin!", ephemeral=True); return
+    profile = eco_get(interaction.user.id)
+    if profile["coins"] < amount:
+        await interaction.response.send_message(
+            f"❌ Bạn chỉ có **{profile['coins']} coins**!", ephemeral=True); return
+
+    deck = bj_deck()
+    random.shuffle(deck)
+    player = [deck.pop(), deck.pop()]
+    dealer = [deck.pop(), deck.pop()]
+
+    view = BlackjackView(deck, player, dealer, amount, interaction.user.id)
+    pv = bj_hand_value(player)
+    embed = discord.Embed(title="🃏 Blackjack", color=discord.Color.blurple())
+    embed.add_field(name=f"Bạn ({pv})", value=bj_hand_str(player), inline=False)
+    embed.add_field(name="Dealer (?)", value=f"`{dealer[0]}` `??`", inline=False)
+    embed.set_footer(text=f"Cược: {amount} coins | Hit hay Stand?")
+    await interaction.response.send_message(embed=embed, view=view)
+
+
+# ── /rps ──────────────────────────────────────────────────────────────────────
+
+rps_challenges: dict[str, dict] = {}
+
+RPS_EMOJI = {"rock": "🪨", "paper": "📄", "scissors": "✂️"}
+RPS_BEATS = {"rock": "scissors", "scissors": "paper", "paper": "rock"}
+
+class RPSChallengeView(discord.ui.View):
+    def __init__(self, challenger_id, opponent_id, amount):
+        super().__init__(timeout=60)
+        self.challenger_id = challenger_id
+        self.opponent_id = opponent_id
+        self.amount = amount
+
+    @discord.ui.button(label="Chấp nhận ✅", style=discord.ButtonStyle.success)
+    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.opponent_id:
+            await interaction.response.send_message("❌ Không phải bạn được thách!", ephemeral=True); return
+        profile = eco_get(self.opponent_id)
+        if profile["coins"] < self.amount:
+            await interaction.response.send_message(
+                f"❌ Bạn không đủ **{self.amount} coins**!", ephemeral=True); return
+        key = f"{self.challenger_id}_{self.opponent_id}"
+        rps_challenges[key] = {"challenger": None, "opponent": None, "amount": self.amount}
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(
+            content=f"✅ Chấp nhận! Cả hai hãy chọn bí mật qua DM bot hoặc dùng nút bên dưới:",
+            view=RPSPlayView(self.challenger_id, self.opponent_id, self.amount, key, interaction.channel)
+        )
+
+    @discord.ui.button(label="Từ chối ❌", style=discord.ButtonStyle.danger)
+    async def decline(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.opponent_id:
+            await interaction.response.send_message("❌ Không phải bạn được thách!", ephemeral=True); return
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(content="❌ Thách đấu bị từ chối.", view=self)
+
+
+class RPSPlayView(discord.ui.View):
+    def __init__(self, challenger_id, opponent_id, amount, key, channel):
+        super().__init__(timeout=60)
+        self.challenger_id = challenger_id
+        self.opponent_id = opponent_id
+        self.amount = amount
+        self.key = key
+        self.channel = channel
+
+    async def check_done(self, interaction: discord.Interaction):
+        data = rps_challenges.get(self.key)
+        if not data or not data["challenger"] or not data["opponent"]:
+            return
+        c_choice = data["challenger"]
+        o_choice = data["opponent"]
+        c_emoji = RPS_EMOJI[c_choice]
+        o_emoji = RPS_EMOJI[o_choice]
+        challenger = await bot.fetch_user(self.challenger_id)
+        opponent = await bot.fetch_user(self.opponent_id)
+
+        if c_choice == o_choice:
+            result = "🤝 Hòa! Không ai mất coin."
+            color = discord.Color.orange()
+        elif RPS_BEATS[c_choice] == o_choice:
+            eco_add(self.opponent_id, -self.amount)
+            eco_add(self.challenger_id, self.amount)
+            result = f"🏆 **{challenger.display_name}** thắng! +{self.amount} coins"
+            color = discord.Color.green()
+        else:
+            eco_add(self.challenger_id, -self.amount)
+            eco_add(self.opponent_id, self.amount)
+            result = f"🏆 **{opponent.display_name}** thắng! +{self.amount} coins"
+            color = discord.Color.green()
+
+        rps_challenges.pop(self.key, None)
+        embed = discord.Embed(title="✂️ Kết quả Oẳn Tù Tì!", color=color)
+        embed.add_field(name=challenger.display_name, value=c_emoji, inline=True)
+        embed.add_field(name="VS", value="⚔️", inline=True)
+        embed.add_field(name=opponent.display_name, value=o_emoji, inline=True)
+        embed.add_field(name="Kết quả", value=result, inline=False)
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    async def handle_choice(self, interaction: discord.Interaction, choice: str):
+        uid = interaction.user.id
+        data = rps_challenges.get(self.key)
+        if not data:
+            await interaction.response.send_message("❌ Game đã hết hạn!", ephemeral=True); return
+        if uid == self.challenger_id and not data["challenger"]:
+            data["challenger"] = choice
+            await interaction.response.send_message(f"✅ Bạn chọn {RPS_EMOJI[choice]}! Đợi đối thủ...", ephemeral=True)
+        elif uid == self.opponent_id and not data["opponent"]:
+            data["opponent"] = choice
+            await interaction.response.send_message(f"✅ Bạn chọn {RPS_EMOJI[choice]}! Đợi đối thủ...", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ Không phải lượt bạn hoặc đã chọn rồi!", ephemeral=True); return
+        rps_challenges[self.key] = data
+        if data["challenger"] and data["opponent"]:
+            await self.check_done(interaction)
+
+    @discord.ui.button(label="🪨", style=discord.ButtonStyle.secondary)
+    async def rock(self, interaction, button): await self.handle_choice(interaction, "rock")
+
+    @discord.ui.button(label="📄", style=discord.ButtonStyle.secondary)
+    async def paper(self, interaction, button): await self.handle_choice(interaction, "paper")
+
+    @discord.ui.button(label="✂️", style=discord.ButtonStyle.secondary)
+    async def scissors(self, interaction, button): await self.handle_choice(interaction, "scissors")
+
+
+@bot.tree.command(name="rps", description="Thách đấu Oẳn Tù Tì cược coin! ✂️")
+@app_commands.describe(user="Người bạn muốn thách", amount="Số coin cược")
+async def slash_rps(interaction: discord.Interaction, user: discord.Member, amount: int):
+    if user.id == interaction.user.id:
+        await interaction.response.send_message("❌ Không thể tự thách chính mình!", ephemeral=True); return
+    if user.bot:
+        await interaction.response.send_message("❌ Không thể thách bot!", ephemeral=True); return
+    if amount <= 0:
+        await interaction.response.send_message("❌ Cược ít nhất 1 coin!", ephemeral=True); return
+    profile = eco_get(interaction.user.id)
+    if profile["coins"] < amount:
+        await interaction.response.send_message(
+            f"❌ Bạn chỉ có **{profile['coins']} coins**!", ephemeral=True); return
+    embed = discord.Embed(
+        title="✂️ Thách Đấu Oẳn Tù Tì!",
+        description=f"{interaction.user.mention} thách {user.mention} với cược **{amount} coins**!\n\n{user.mention} có chấp nhận không?",
+        color=discord.Color.blurple()
+    )
+    await interaction.response.send_message(embed=embed, view=RPSChallengeView(interaction.user.id, user.id, amount))
+
+# ── /quiz anime ───────────────────────────────────────────────────────────────
+
+active_quizzes: dict[int, dict] = {}
+
+ANIME_QUESTIONS = [
+    {"q": "Trái ác quỷ Gomu Gomu cho người ăn khả năng gì?", "a": "cao su", "hint": "cơ thể co giãn như..."},
+    {"q": "Naruto thuộc làng ninja nào?", "a": "lá", "hint": "tên một loại cây"},
+    {"q": "Goku thuộc tộc người nào?", "a": "saiyan", "hint": "chiến binh vũ trụ"},
+    {"q": "Thuyền trưởng băng Mũ Rơm là ai?", "a": "luffy", "hint": "tên bắt đầu bằng L"},
+    {"q": "Thanh kiếm của Zoro có bao nhiêu cây?", "a": "3", "hint": "số lẻ nhỏ hơn 5"},
+    {"q": "Titan Chiến Lược trong AoT là ai?", "a": "eren", "hint": "nhân vật chính"},
+    {"q": "Tanjiro săn lùng loài gì?", "a": "quỷ", "hint": "sinh vật ăn người ban đêm"},
+    {"q": "Vegeta là hoàng tử của hành tinh nào?", "a": "vegeta", "hint": "cùng tên nhân vật"},
+    {"q": "Sharingan là mắt đặc trưng của tộc nào trong Naruto?", "a": "uchiha", "hint": "Sasuke thuộc tộc này"},
+    {"q": "Luffy ăn trái ác quỷ loại gì (Paramecia/Zoan/Logia)?", "a": "paramecia", "hint": "loại phổ biến nhất"},
+    {"q": "Đội trưởng đội Điều Tra trong AoT là ai?", "a": "levi", "hint": "người được gọi là nhân loại mạnh nhất"},
+    {"q": "Muzan Kibutsuji là trùm cuối của anime nào?", "a": "demon slayer", "hint": "thợ săn quỷ"},
+    {"q": "Beerus là thần gì trong Dragon Ball?", "a": "hủy diệt", "hint": "ngược với sáng tạo"},
+    {"q": "Brook trong One Piece ăn trái ác quỷ gì?", "a": "yomi yomi", "hint": "liên quan đến linh hồn"},
+    {"q": "Itachi giết cả gia tộc mình để làm gì?", "a": "bảo vệ làng lá", "hint": "hy sinh vì..."},
+]
+
+class QuizAnswerView(discord.ui.View):
+    def __init__(self, channel_id: int):
+        super().__init__(timeout=30)
+        self.channel_id = channel_id
+
+    @discord.ui.button(label="💡 Hint", style=discord.ButtonStyle.secondary)
+    async def hint(self, interaction: discord.Interaction, button: discord.ui.Button):
+        quiz = active_quizzes.get(self.channel_id)
+        if not quiz:
+            await interaction.response.send_message("❌ Quiz đã kết thúc!", ephemeral=True); return
+        await interaction.response.send_message(f"💡 Gợi ý: *{quiz['hint']}*", ephemeral=True)
+
+
+@bot.tree.command(name="quiz", description="Quiz anime 30 giây — ai trả lời đúng trước win coin! 🧠")
+@app_commands.describe(reward="Số coin thưởng cho người trả lời đúng (mặc định 50)")
+async def slash_quiz(interaction: discord.Interaction, reward: int = 50):
+    ch = interaction.channel_id
+    if ch in active_quizzes:
+        await interaction.response.send_message("❌ Đang có quiz chạy rồi! Trả lời câu hiện tại trước.", ephemeral=True)
+        return
+
+    q = random.choice(ANIME_QUESTIONS)
+    active_quizzes[ch] = {
+        "answer": q["a"].lower(),
+        "hint": q["hint"],
+        "reward": reward,
+        "answered": False,
+    }
+
+    embed = discord.Embed(
+        title="🧠 Anime Quiz!",
+        description=f"**{q['q']}**\n\nGõ câu trả lời vào chat! Có **30 giây**!\n💡 Dùng nút Hint nếu cần (chỉ mình bạn thấy)",
+        color=discord.Color.purple()
+    )
+    embed.set_footer(text=f"Thưởng: {reward} coins cho người trả lời đúng đầu tiên!")
+    await interaction.response.send_message(embed=embed, view=QuizAnswerView(ch))
+
+    await asyncio.sleep(30)
+    quiz = active_quizzes.get(ch)
+    if quiz and not quiz["answered"]:
+        active_quizzes.pop(ch, None)
+        await interaction.channel.send(f"⏰ **Hết giờ!** Đáp án là: **{q['a']}**")
+
+
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot:
+        return
+    await bot.process_commands(message)
+
+    # Quiz check
+    ch = message.channel.id
+    quiz = active_quizzes.get(ch)
+    if quiz and not quiz["answered"]:
+        if message.content.strip().lower() == quiz["answer"]:
+            quiz["answered"] = True
+            active_quizzes.pop(ch, None)
+            new_bal = eco_add(message.author.id, quiz["reward"])
+            embed = discord.Embed(
+                title="🎉 Chính xác!",
+                description=f"{message.author.mention} trả lời đúng!\n💰 **+{quiz['reward']} coins** → **{new_bal} coins**",
+                color=discord.Color.green()
+            )
+            await message.channel.send(embed=embed)
+            return
+
+    mentioned = bot.user in message.mentions
+    is_dm = isinstance(message.channel, discord.DMChannel)
+    is_auto_channel = message.channel.id == AUTO_REPLY_CHANNEL_ID
+
+    if not (mentioned or is_dm or is_auto_channel):
+        return
+
+    content = message.content
+    for m in message.mentions:
+        content = content.replace(f"<@{m.id}>", "").replace(f"<@!{m.id}>", "")
+    content = content.strip()
+
+    if not content:
+        if not is_auto_channel:
+            await message.reply("Hey! How can I help you? Try `/help` to see all commands.")
+        return
+
+    async with message.channel.typing():
+        try:
+            reply = await asyncio.get_event_loop().run_in_executor(
+                None, ask_ai, message.channel.id, content
+            )
+        except Exception as exc:
+            log.exception("AI error: %s", exc)
+            await message.reply("Something went wrong. Please try again.")
+            return
+
+    if not reply:
+        await message.reply("Got an empty response. Please try again.")
+        return
+
+    await reply_long(message, reply)
+
+
+# ── Economy: Streak Daily ─────────────────────────────────────────────────────
+
+# Patch slash_daily để thêm streak (thêm vào hàm slash_daily hiện có)
+# Thay toàn bộ slash_daily bằng cái này:
+
+@bot.tree.command(name="daily", description="Claim your daily coins! 💰")
+async def slash_daily(interaction: discord.Interaction):
+    uid = interaction.user.id
+    data = eco_load()
+    key = str(uid)
+    now = time.time()
+    user_data = data.get(key, dict(_ECO_USER_DEFAULT))
+    last = user_data.get("last_daily", 0)
+    elapsed = now - last
+
+    if elapsed < 86400:
+        remaining = 86400 - elapsed
+        hours, rem = divmod(int(remaining), 3600)
+        minutes = rem // 60
+        await interaction.response.send_message(
+            f"⏳ Đã claim rồi! Quay lại sau **{hours}h {minutes}m**.", ephemeral=True)
+        return
+
+    s = eco_settings()
+    streak = user_data.get("streak", 0)
+    if elapsed < 172800:  # trong vòng 48h → giữ streak
+        streak += 1
+    else:
+        streak = 1  # reset streak
+
+    bonus = random.randint(s["daily_min"], s["daily_max"])
+    streak_bonus = min(streak * 10, 200)  # tối đa +200 từ streak
+    total = bonus + streak_bonus
+
+    user_data["coins"] = user_data.get("coins", 0) + total
+    user_data["total_earned"] = user_data.get("total_earned", 0) + total
+    user_data["last_daily"] = now
+    user_data["streak"] = streak
+    user_data.setdefault("badges", [])
+    data[key] = user_data
+    eco_save(data)
+
+    streak_str = f"🔥 Streak **{streak} ngày** (+{streak_bonus} bonus)" if streak > 1 else "Streak: 1 ngày"
+    embed = discord.Embed(
+        title="💰 Daily Claimed!",
+        description=f"**+{total} coins** (base {bonus} + streak {streak_bonus})\nBalance: **{user_data['coins']} coins** 🪙\n{streak_str}",
+        color=discord.Color.gold()
+    )
+    if streak >= 7:
+        embed.add_field(name="🏆", value="1 tuần streak! Tuyệt vời!", inline=False)
+    embed.set_footer(text="Claim đúng giờ mỗi ngày để giữ streak!")
+    await interaction.response.send_message(embed=embed)
+
+
+# ── /birthday ─────────────────────────────────────────────────────────────────
+
+BIRTHDAY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "birthdays.json")
+BIRTHDAY_CHANNEL_ID: int = AUTO_REPLY_CHANNEL_ID  # đổi thành channel muốn chúc
+
+def bday_load() -> dict:
+    if os.path.exists(BIRTHDAY_FILE):
+        try:
+            with open(BIRTHDAY_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def bday_save(data: dict) -> None:
+    with open(BIRTHDAY_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+birthday_group = app_commands.Group(name="birthday", description="Quản lý ngày sinh nhật 🎂")
+
+@birthday_group.command(name="set", description="Lưu ngày sinh của bạn để bot tự chúc! 🎂")
+@app_commands.describe(day="Ngày (1-31)", month="Tháng (1-12)")
+async def birthday_set(interaction: discord.Interaction, day: int, month: int):
+    if not (1 <= day <= 31 and 1 <= month <= 12):
+        await interaction.response.send_message("❌ Ngày/tháng không hợp lệ!", ephemeral=True); return
+    data = bday_load()
+    data[str(interaction.user.id)] = {
+        "day": day, "month": month,
+        "guild_id": interaction.guild_id,
+        "username": interaction.user.display_name,
+    }
+    bday_save(data)
+    await interaction.response.send_message(
+        f"🎂 Đã lưu sinh nhật **{day}/{month}** của bạn! Bot sẽ tự chúc vào ngày đó.", ephemeral=True)
+
+@birthday_group.command(name="check", description="Xem ngày sinh đã lưu")
+async def birthday_check(interaction: discord.Interaction):
+    data = bday_load()
+    entry = data.get(str(interaction.user.id))
+    if not entry:
+        await interaction.response.send_message("❌ Bạn chưa lưu sinh nhật! Dùng `/birthday set`.", ephemeral=True); return
+    await interaction.response.send_message(
+        f"🎂 Sinh nhật của bạn: **{entry['day']}/{entry['month']}**", ephemeral=True)
+
+@birthday_group.command(name="remove", description="Xóa ngày sinh đã lưu")
+async def birthday_remove(interaction: discord.Interaction):
+    data = bday_load()
+    if str(interaction.user.id) in data:
+        data.pop(str(interaction.user.id))
+        bday_save(data)
+    await interaction.response.send_message("✅ Đã xóa ngày sinh của bạn.", ephemeral=True)
+
+bot.tree.add_command(birthday_group)
+
+async def birthday_checker():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        now = datetime.datetime.now()
+        if now.hour == 8 and now.minute == 0:  # chạy lúc 8:00 sáng
+            data = bday_load()
+            for uid, entry in data.items():
+                if entry["day"] == now.day and entry["month"] == now.month:
+                    try:
+                        channel = bot.get_channel(BIRTHDAY_CHANNEL_ID)
+                        if channel:
+                            user = await bot.fetch_user(int(uid))
+                            reward = 300
+                            new_bal = eco_add(int(uid), reward)
+                            embed = discord.Embed(
+                                title="🎂 Chúc Mừng Sinh Nhật!",
+                                description=f"Hôm nay là sinh nhật của {user.mention}! 🎉🎊\n💰 Tặng **{reward} coins** sinh nhật!\nBalance: **{new_bal} coins**",
+                                color=discord.Color.gold()
+                            )
+                            await channel.send(embed=embed)
+                    except Exception as e:
+                        log.warning("Birthday check error: %s", e)
+        await asyncio.sleep(60)
+
+bot.loop.create_task(birthday_checker())
+
 if __name__ == "__main__":
     
     bot.run(DISCORD_BOT_TOKEN, log_handler=None)
