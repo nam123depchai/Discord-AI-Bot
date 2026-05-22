@@ -2050,28 +2050,22 @@ async def slash_ask(interaction: discord.Interaction, question: str):
         f"- Chỉ trả lời ngắn gọn, không giải thích"
     )
 
-try:
+    try:
         reply = await asyncio.get_event_loop().run_in_executor(None, ask_ai_once, prompt)
+        lines = [l.strip() for l in reply.strip().split("\n") if l.strip()]
+        reply = lines[0] if lines else "Không rõ"
+        reply = reply.strip("*").strip()
+        if not reply:
+            reply = "Không rõ"
     except Exception:
         await interaction.followup.send("❌ Lỗi AI! Thử lại nhé.")
         return
-
-    # Lấy dòng đầu tiên không rỗng
-    lines = [l.strip() for l in reply.strip().split("\n") if l.strip()]
-    reply = lines[0] if lines else "Không rõ"
-
-    # Bỏ ** nếu AI tự thêm vào
-    reply = reply.strip("*").strip()
-
-    if not reply:
-        reply = "Không rõ"
 
     embed = discord.Embed(color=discord.Color.blue())
     embed.add_field(name=f"❓ Câu #{state['questions']}", value=f"*{question}*", inline=False)
     embed.add_field(name="💬 Trả lời", value=f"**{reply}**", inline=False)
     embed.set_footer(text=f"Topic: {topic} | Dùng /guess <tên> nếu đã biết!")
     await interaction.followup.send(embed=embed)
-
 
 @bot.tree.command(name="guess", description="Đoán tên nhân vật bí mật! 🕵️")
 @app_commands.describe(character="Tên nhân vật bạn đoán")
