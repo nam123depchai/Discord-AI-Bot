@@ -16,6 +16,7 @@ import requests as req
 from urllib.parse import quote
 import cloudscraper
 from bs4 import BeautifulSoup
+from discord.ext import tasks
 
 logging.basicConfig(
     level=logging.INFO,
@@ -2612,8 +2613,15 @@ async def birthday_checker():
                         log.warning("Birthday check error: %s", e)
         await asyncio.sleep(60)
 
-bot.loop.create_task(birthday_checker())
+# XÓA HOẶC ĐỔI DÒNG NÀY THÀNH DẤU # (Đã xóa dòng lỗi bot.loop.create_task cũ ở đây)
+
+@bot.event
+async def on_ready():
+    # Tạo task an toàn trong môi trường async khi bot đã sẵn sàng
+    bot.loop.create_task(birthday_checker())
+    print("Birthday checker task started!")
 
 if __name__ == "__main__":
     
     bot.run(DISCORD_BOT_TOKEN, log_handler=None)
+    
